@@ -41,7 +41,7 @@ trap 'rm -rf "$STAGE"' EXIT
 
 mkdir -p "$STAGE/bin"
 install -m 0755 deploy/bootstrap.sh deploy/install.sh "$STAGE/"
-install -m 0644 deploy/panelvps.service deploy/panelvps-container.conf "$STAGE/"
+install -m 0644 deploy/panelvps.service deploy/panelvps-container.conf deploy/panelvps-sysctl.service "$STAGE/"
 cp dist/panelvps-linux-amd64 dist/panelvps-linux-arm64 "$STAGE/bin/"
 chmod 0755 "$STAGE"/bin/*
 

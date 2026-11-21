@@ -1,0 +1,16 @@
+[Unit]
+Description=PanelVPS kernel tuning apply
+Documentation=https://github.com/Everything-is-one/panelvps
+# 面板只写这一个文件；文件不存在时直接跳过。
+ConditionPathExists=/etc/sysctl.d/99-panelvps.conf
+After=local-fs.target
+
+[Service]
+Type=oneshot
+# 该单元由面板触发，运行在面板自身的沙箱之外：
+# 主服务开启了 ProtectKernelTunables，无法直接写 /proc/sys。
+ExecStartPre=-/sbin/modprobe tcp_bbr
+ExecStart=/sbin/sysctl -p /etc/sysctl.d/99-panelvps.conf
+
+[Install]
+WantedBy=multi-user.target

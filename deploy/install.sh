@@ -4,6 +4,7 @@
 # 用法：
 #   sudo ./install.sh            安装或升级（保留数据）
 #   sudo ./install.sh --check    只体检环境，不安装
+#   sudo ./install.sh --public   监听 0.0.0.0，可通过 IP:端口 直接访问
 #   sudo ./install.sh --uninstall 卸载（保留 /opt/panelvps/data）
 #
 # 设计原则：幂等、失败即停、任何覆盖前先备份。
@@ -167,7 +168,19 @@ env_report() {
 }
 
 # ---------- 参数 ----------
-ACTION="${1:-install}"
+ACTION="install"
+PUBLIC=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --check|check)  ACTION="--check"; shift ;;
+        --uninstall)    ACTION="--uninstall"; shift ;;
+        --public)       PUBLIC=1; shift ;;
+        install)        ACTION="install"; shift ;;
+        -h|--help)      sed -n '2,12p' "$0"; exit 0 ;;
+        *)              die "未知参数: $1（--help 查看用法）" ;;
+    esac
+done
+
 [[ $EUID -eq 0 ]] || die "需要 root 权限运行"
 command -v systemctl >/dev/null || die "未检测到 systemd。若在容器里，请先用 systemd 作为 init 启动容器"
 
@@ -183,8 +196,17 @@ if [[ "$ACTION" == "--uninstall" ]]; then
     info "停止并禁用服务"
     systemctl stop panelvps 2>/dev/null || true
     systemctl disable panelvps 2>/dev/null || true
+    systemctl stop panelvps-sysctl 2>/dev/null || true
+    systemctl disable panelvps-sysctl 2>/dev/null || true
     rm -f "$UNIT"
+    rm -f /etc/systemd/system/panelvps-sysctl.service
     rm -rf "$DROPIN_DIR"
+    if [[ -f /etc/sysctl.d/99-panelvps.conf ]]; then
+        rm -f /etc/sysctl.d/99-panelvps.conf
+        if [[ "$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null || true)" == "bbr" ]]; then
+            sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
+        fi
+    fi
     systemctl daemon-reload
     info "已移除服务单元。数据目录保留在 $DATA（确认无用后可手动删除）"
     exit 0
@@ -244,8 +266,21 @@ if [[ ! -f "$CONF" ]]; then
     "$BIN" info -config "$CONF" >/dev/null 2>&1 || true
 fi
 
+if [[ "$PUBLIC" -eq 1 ]]; then
+    CFG_PORT=$(grep -E '^listen:' "$CONF" | sed 's/.*://' | tr -d ' ' || true)
+    CFG_PORT=${CFG_PORT:-20873}
+    sed -i -E "s|^listen:.*|listen: 0.0.0.0:${CFG_PORT}|" "$CONF"
+    info "监听地址已改为 0.0.0.0:${CFG_PORT}（可通过 IP:端口 访问）"
+fi
+
 info "安装 systemd 单元"
 install -m 0644 "$(dirname "$0")/panelvps.service" "$UNIT"
+
+if [[ -f "$(dirname "$0")/panelvps-sysctl.service" ]]; then
+    install -m 0644 "$(dirname "$0")/panelvps-sysctl.service" /etc/systemd/system/panelvps-sysctl.service
+else
+    warn "未找到 panelvps-sysctl.service，BBR 开关将不可用"
+fi
 
 # 容器里主单元的加固项会让 systemd 直接拒绝启动，提前换成降级版
 if [[ -n "$CONTAINER" ]]; then
@@ -262,6 +297,7 @@ fi
 
 systemctl daemon-reload
 systemctl enable panelvps >/dev/null
+systemctl enable panelvps-sysctl >/dev/null 2>&1 || true
 
 info "启动服务"
 systemctl start panelvps
@@ -292,9 +328,6 @@ if [[ ! -d /etc/nginx/conf.d ]]; then
     info "提示：/etc/nginx/conf.d 不存在时，站点下发会失败；装好 Nginx 后该目录会自动创建"
 fi
 
-PORT=$(grep -E '^listen:' "$CONF" | awk '{print $2}' | awk -F: '{print $2}' || true)
-PORT=${PORT:-20873}
-
 # 新装时把初始密码从 journald 里取出来直接显示，省掉手工 grep。
 # 优先解析 slog 的 JSON 行（"password":"..."），其次是启动横幅里的「密  码: ...」。
 INIT_PWD=""
@@ -311,10 +344,14 @@ if [[ "$NEW_INSTALL" == "1" ]] && command -v journalctl >/dev/null 2>&1; then
     done
 fi
 
+LISTEN_ADDR=$(grep -E '^listen:' "$CONF" | awk '{print $2}' || true)
+LISTEN_ADDR=${LISTEN_ADDR:-127.0.0.1:20873}
+PORT=${LISTEN_ADDR##*:}
+
 echo
 echo "================================================"
 echo " PanelVPS 已启动"
-echo " 监听: $(grep -E '^listen:' "$CONF" | awk '{print $2}' || echo '127.0.0.1:20873')"
+echo " 监听: ${LISTEN_ADDR}"
 if [[ -n "$INIT_PWD" ]]; then
     echo " 用户名: admin"
     echo " 密  码: $INIT_PWD"
@@ -323,15 +360,31 @@ else
     echo "       （已装过则沿用原密码；忘了可 panelvps reset-password）"
 fi
 echo
-echo " 默认只监听本机，推荐用 SSH 隧道访问："
-echo "   ssh -L ${PORT}:127.0.0.1:${PORT} root@<服务器IP>"
-echo " 然后浏览器打开 http://127.0.0.1:${PORT}"
+case "$LISTEN_ADDR" in
+    0.0.0.0:*|\[::\]:*|:::*)
+        ACCESS_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+        echo " 访问: http://${ACCESS_IP:-<服务器公网IP>}:${PORT}"
+        echo " 注意: 云厂商安全组需放行 ${PORT}/tcp；面板是 HTTP，请使用强密码。"
+        ;;
+    *)
+        echo " 仅监听本机，建议用 SSH 隧道访问："
+        echo "   ssh -L ${PORT}:127.0.0.1:${PORT} root@<服务器IP>"
+        echo " 然后浏览器打开 http://127.0.0.1:${PORT}"
+        ;;
+esac
 echo "================================================"
 echo
 
 if [[ -n "$CONTAINER" ]]; then
     echo "容器环境提醒："
-    echo "  · 面板只监听 127.0.0.1，必须走上面的 SSH 隧道；要在局域网直连就把 conf 里 listen 改成 0.0.0.0:${PORT}"
+    case "$LISTEN_ADDR" in
+        127.0.0.1:*|\[::1\]:*)
+            echo "  · 面板只监听本机，必须走上面的 SSH 隧道；要直连就把 conf 里 listen 改成 0.0.0.0:${PORT}"
+            ;;
+        *)
+            echo "  · 面板已监听 ${LISTEN_ADDR}；NAT 容器还需要商家面板做端口映射"
+            ;;
+    esac
     echo "  · 防火墙是否可下发取决于容器有没有 CAP_NET_ADMIN，可跑 ./install.sh --check 复核"
     echo "  · 非特权容器绑不了 80/443，Nginx 站点需宿主放开 net.ipv4.ip_unprivileged_port_start=0"
     echo

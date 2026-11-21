@@ -5,8 +5,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/main/deploy/bootstrap.sh | sudo bash
 #
 # 安装指定版本（脚本与二进制都锁在该 tag，生产环境推荐）：
-#   curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.1.1/deploy/bootstrap.sh \
-#     | sudo bash -s -- --ref v0.1.1
+#   curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.2.0/deploy/bootstrap.sh \
+#     | sudo bash -s -- --ref v0.2.0
 #
 # 自建分发（国内访问 GitHub 慢时用，目录里放 bootstrap.sh + install.sh + 两个 conf + bin/ + SHA256SUMS）：
 #   curl -fsSL https://你的域名/panelvps/bootstrap.sh | sudo bash
@@ -20,6 +20,7 @@
 #   --ref REF      分支或 tag，默认 main；写 v* 时二进制锁定到该 tag
 #   --token TOKEN  私有仓库的 GitHub token（走 API；不建议在命令行明文传）
 #   --check        只体检环境，不安装
+#   --public       安装后监听 0.0.0.0，可通过 IP:端口 直接访问
 #   --keep         保留临时目录，便于排查
 #   -h, --help     显示帮助
 
@@ -31,6 +32,7 @@ BASE="${PV_BASE:-}"
 TOKEN="${GH_TOKEN:-}"
 KEEP=0
 CHECK_ONLY=0
+PUBLIC=0
 
 die() { echo "错误: $*" >&2; exit 1; }
 info() { echo "[*] $*"; }
@@ -50,6 +52,7 @@ usage() {
   --repo O/R     GitHub 仓库，默认 Everything-is-one/panelvps
   --ref REF      分支或 tag，默认 main；写 v* 时二进制锁定到该 tag
   --check        只体检环境，不安装
+  --public       安装后监听 0.0.0.0，可通过 IP:端口 直接访问
   --keep         保留临时目录，便于排查
   -h, --help     显示帮助
 
@@ -64,6 +67,7 @@ while [[ $# -gt 0 ]]; do
         --ref)    REF="${2:?--ref 需要分支或 tag}"; shift 2 ;;
         --token)  TOKEN="${2:?--token 需要值}"; shift 2 ;;
         --check)  CHECK_ONLY=1; shift ;;
+        --public) PUBLIC=1; shift ;;
         --keep)   KEEP=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "未知参数: $1（--help 查看用法）" ;;
@@ -204,6 +208,8 @@ fetch "deploy/panelvps.service" "$TMP/panelvps.service" \
     || die "拉取 panelvps.service 失败"
 fetch "deploy/panelvps-container.conf" "$TMP/panelvps-container.conf" \
     || die "拉取 panelvps-container.conf 失败"
+fetch "deploy/panelvps-sysctl.service" "$TMP/panelvps-sysctl.service" \
+    || warn "拉取 panelvps-sysctl.service 失败，BBR 开关将不可用"
 chmod 0755 "$TMP/install.sh"
 
 # 校验清单可选：有就校验，没有就明确提示
@@ -228,5 +234,7 @@ echo
 if [[ "$CHECK_ONLY" -eq 1 ]]; then
     bash "$TMP/install.sh" --check
 else
-    PV_BIN="$TMP/bin/panelvps" bash "$TMP/install.sh"
+    INSTALL_ARGS=()
+    [[ "$PUBLIC" -eq 1 ]] && INSTALL_ARGS+=(--public)
+    PV_BIN="$TMP/bin/panelvps" bash "$TMP/install.sh" "${INSTALL_ARGS[@]}"
 fi

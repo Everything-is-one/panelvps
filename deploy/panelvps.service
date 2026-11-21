@@ -27,7 +27,7 @@ ProtectSystem=strict
 # /var/www 是站点根目录与 ACME 校验目录。
 # 前置 "-" 表示目录不存在时跳过，否则 systemd 会因挂载失败而拒绝启动。
 ReadWritePaths=-/opt/panelvps/data -/opt/panelvps/conf \
-               -/etc/nginx/conf.d -/etc/nftables.d \
+               -/etc/nginx/conf.d -/etc/nftables.d -/etc/sysctl.d \
                -/etc/letsencrypt -/var/lib/letsencrypt -/var/log/letsencrypt \
                -/var/www -/var/log -/run
 PrivateTmp=yes
