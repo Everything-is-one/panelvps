@@ -200,6 +200,9 @@ if [[ "$ACTION" == "--uninstall" ]]; then
     systemctl disable panelvps-sysctl 2>/dev/null || true
     rm -f "$UNIT"
     rm -f /etc/systemd/system/panelvps-sysctl.service
+    if [[ -L /usr/local/bin/panelvps ]]; then
+        rm -f /usr/local/bin/panelvps
+    fi
     rm -rf "$DROPIN_DIR"
     if [[ -f /etc/sysctl.d/99-panelvps.conf ]]; then
         rm -f /etc/sysctl.d/99-panelvps.conf
@@ -258,6 +261,13 @@ fi
 
 info "安装二进制"
 install -m 0755 "$SRC" "$BIN"
+
+# 让用户在任何目录敲 panelvps 都能进管理菜单（systemd 用的是绝对路径，不受影响）
+LINK="/usr/local/bin/panelvps"
+if [[ -d /usr/local/bin ]]; then
+    ln -sf "$BIN" "$LINK"
+    ok "命令已链接到 $LINK"
+fi
 
 NEW_INSTALL=0
 if [[ ! -f "$CONF" ]]; then
@@ -372,6 +382,7 @@ case "$LISTEN_ADDR" in
         echo " 然后浏览器打开 http://127.0.0.1:${PORT}"
         ;;
 esac
+echo " 管理: 输入 panelvps 回车，打开管理菜单（启停 / 端口 / 重置密码 / BBR）"
 echo "================================================"
 echo
 
