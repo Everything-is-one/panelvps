@@ -321,11 +321,16 @@ func Verify(ctx context.Context, checksumURL, assetName, filePath string) (bool,
 	return true, nil
 }
 
-// Apply 原子替换目标二进制，保留上一版。
+// Apply 原子替换目标二进制，保留上一版。仅 Linux 可用。
 func Apply(newBin, target string) (string, error) {
 	if runtime.GOOS != "linux" {
 		return "", ErrUnsupported
 	}
+	return applyTo(newBin, target)
+}
+
+// applyTo 是 Apply 的实现，单独拆出来方便在开发机上跑测试。
+func applyTo(newBin, target string) (string, error) {
 	raw, err := os.ReadFile(newBin)
 	if err != nil {
 		return "", err
@@ -333,26 +338,93 @@ func Apply(newBin, target string) (string, error) {
 	if len(raw) < 4 || string(raw[:4]) != "\x7fELF" {
 		return "", errors.New("下载的文件不是 Linux ELF 可执行文件")
 	}
-	if err := os.Chmod(newBin, 0o755); err != nil {
+
+	// 目标可能是个软链（/usr/local/bin/panelvps -> /opt/...），
+	// 换掉软链本身会把布局弄坏，先落到真实路径上。
+	if real, err := filepath.EvalSymlinks(target); err == nil {
+		target = real
+	}
+	dir := filepath.Dir(target)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
 
+	// 先把新二进制落到目标目录里再 rename。下载的临时文件在 /tmp，而 /tmp 常常是
+	// tmpfs，与 /opt 不是同一个文件系统，跨设备 rename 会直接返回
+	// EXDEV（invalid cross-device link）。同目录内的 rename 才是原子的。
+	staged := filepath.Join(dir, "."+filepath.Base(target)+".new-"+strconv.FormatInt(time.Now().UnixNano(), 36))
+	if err := writeExec(staged, raw); err != nil {
+		return "", fmt.Errorf("写入新版本失败（%s 是否可写？）: %w", dir, err)
+	}
+	defer os.Remove(staged) // 成功后它已被 rename 走，这里删的是不存在的路径，忽略
+
 	backup := target + ".old-" + time.Now().Format("20060102-150405")
 	if _, err := os.Stat(target); err == nil {
-		if err := os.Rename(target, backup); err != nil {
-			return "", fmt.Errorf("备份旧版本失败: %w", err)
+		// 用硬链接留底：同一 inode，瞬间完成，且不会出现「目标文件短暂消失」的窗口
+		if err := os.Link(target, backup); err != nil {
+			if err := copyFile(target, backup); err != nil {
+				return "", fmt.Errorf("备份旧版本失败: %w", err)
+			}
 		}
 	}
-	if err := os.Rename(newBin, target); err != nil {
-		// 替换失败则把旧版本换回来
-		_ = os.Rename(backup, target)
+	if err := os.Rename(staged, target); err != nil {
 		return "", fmt.Errorf("替换二进制失败: %w", err)
 	}
 	if err := os.Chmod(target, 0o755); err != nil {
 		return backup, err
 	}
-	_ = os.MkdirAll(filepath.Dir(target), 0o755)
 	return backup, nil
+}
+
+// copyFile 在硬链接不可用时复制一份，权限照抄源文件。
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	fi, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, fi.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	return out.Close()
+}
+
+// writeExec 落一个可执行文件并刷盘，避免掉电后拿到半截二进制。
+func writeExec(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o755)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return os.Chmod(path, 0o755)
 }
 
 func clip(s string, n int) string {
