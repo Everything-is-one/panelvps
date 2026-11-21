@@ -15,6 +15,15 @@ const state = {
 
 const app = () => document.getElementById("app");
 
+// 本文件被加载时的版本号（由服务端在 index.html 里注入 ?v=）。
+// 与接口返回的面板版本不一致，说明浏览器拿的是旧脚本。
+const FE_VERSION = (() => {
+  try {
+    const src = document.currentScript && document.currentScript.src;
+    return src ? new URL(src, location.href).searchParams.get("v") || "" : "";
+  } catch (e) { return ""; }
+})();
+
 function cookie(name) {
   const m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
   return m ? decodeURIComponent(m[1]) : "";
@@ -1727,6 +1736,13 @@ function renderSettingsView(root) {
       info.replaceChildren.apply(info, rows.map(([k, v]) =>
         el("tr", {}, [el("th", { text: k }), el("td", { class: "mono", text: String(v || "-") })])));
       paintUpdate(d.update);
+      if (FE_VERSION && p.version && p.version !== FE_VERSION) {
+        const stale = el("div", { class: "msg err", style: "margin-bottom:12px" }, [
+          el("span", { text: "当前页面用的是旧版前端（" + FE_VERSION + "），服务端已是 " + p.version + "，部分设置项可能显示不全。" }),
+          el("button", { class: "ghost", text: "刷新页面", style: "margin-left:10px", onclick: () => location.reload() }),
+        ]);
+        root.insertBefore(stale, root.firstChild);
+      }
     } catch (e) {
       msg.className = "msg err";
       msg.textContent = e.message;

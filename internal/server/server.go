@@ -2,7 +2,10 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -24,6 +27,7 @@ import (
 	"github.com/Everything-is-one/panelvps/internal/sites"
 	"github.com/Everything-is-one/panelvps/internal/softstore"
 	"github.com/Everything-is-one/panelvps/internal/store"
+	"github.com/Everything-is-one/panelvps/internal/version"
 	"github.com/Everything-is-one/panelvps/internal/xray"
 	"github.com/Everything-is-one/panelvps/web"
 )
@@ -356,10 +360,26 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		ct = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", ct)
+
+	// 首页每次都重新取，并把版本号注入脚本地址：升级后 URL 变化，
+	// 浏览器不会继续用上一版缓存的前端脚本（曾出现「升级了但界面没变」）。
 	if upath == "index.html" {
+		q := []byte("?v=" + version.Version)
+		raw = bytes.ReplaceAll(raw, []byte(`/app.js"`), append(append([]byte("/app.js"), q...), '"'))
+		raw = bytes.ReplaceAll(raw, []byte(`/app.css"`), append(append([]byte("/app.css"), q...), '"'))
 		w.Header().Set("Cache-Control", "no-store")
-	} else {
-		w.Header().Set("Cache-Control", "public, max-age=3600")
+		_, _ = w.Write(raw)
+		return
+	}
+
+	// 其余静态资源要求回源校验，配合 ETag 命中返回 304，避免升级后残留旧文件。
+	sum := sha256.Sum256(raw)
+	etag := `"` + hex.EncodeToString(sum[:8]) + `"`
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "no-cache")
+	if inm := r.Header.Get("If-None-Match"); inm != "" && strings.Contains(inm, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
 	}
 	_, _ = w.Write(raw)
 }
