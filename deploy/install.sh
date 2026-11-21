@@ -190,23 +190,32 @@ if [[ "$ACTION" == "--uninstall" ]]; then
     exit 0
 fi
 
+# ---------- 环境检查 ----------
+ARCH=$(uname -m)
+case "$ARCH" in
+    x86_64|amd64)  SUFFIX="amd64" ;;
+    aarch64|arm64) SUFFIX="arm64" ;;
+    *) die "不支持的架构: $ARCH" ;;
+esac
+
 # ---------- 定位二进制 ----------
 # bootstrap.sh 会通过 PV_BIN 指过来；手工执行时按约定目录查找。
+# 发布包里的资产名带架构后缀，仓库构建则多在 bin/ 或 dist/。
 SRC="${PV_BIN:-}"
 if [[ -z "$SRC" ]]; then
-    for p in "$(dirname "$0")/bin/panelvps" "$(dirname "$0")/panelvps" "./bin/panelvps" "/opt/panelvps/bin/panelvps.new"; do
+    for p in \
+        "$(dirname "$0")/bin/panelvps" \
+        "$(dirname "$0")/bin/panelvps-linux-$SUFFIX" \
+        "$(dirname "$0")/panelvps" \
+        "./bin/panelvps" \
+        "./dist/panelvps-linux-$SUFFIX" \
+        "./dist/panelvps" \
+        "/opt/panelvps/bin/panelvps.new"; do
         if [[ -f "$p" ]]; then SRC="$p"; break; fi
     done
 fi
 [[ -n "$SRC" ]] || die "找不到 panelvps 二进制：请用 PV_BIN=/path/to/panelvps 指定，或把脚本与 bin/panelvps 放在同一目录"
 [[ -f "$SRC" ]] || die "PV_BIN 指向的二进制不存在: $SRC"
-
-# ---------- 环境检查 ----------
-ARCH=$(uname -m)
-case "$ARCH" in
-    x86_64|aarch64) ;;
-    *) die "不支持的架构: $ARCH" ;;
-esac
 
 CONTAINER=$(detect_container)
 
