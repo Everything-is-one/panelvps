@@ -113,8 +113,13 @@ p.sub { color: var(--muted); margin: 6px 0 0; font-size: 13px; line-height: 1.5;
   font-size: 10.5px; font-weight: 600; letter-spacing: .08em;
   color: var(--muted-2); padding: 0 10px 6px; text-transform: uppercase;
 }
+/* 图标列用 grid 写死 18px，而不是 flex + gap：
+ * <button> 的 UA 样式是 text-align:center，一旦某条目的文字多一个字，
+ * flex 布局下整行（含图标）会一起往左挪半字，看起来就是「图标没对齐」。
+ * grid 的列宽与内容宽度无关，2 字/3 字条目的图标恒定落在同一 x 上。 */
 .nav-item {
-  display: flex; align-items: center; gap: 10px;
+  display: grid; grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center; column-gap: 11px; justify-content: start;
   width: 100%; margin: 0; padding: 0 10px; height: 36px;
   border: 0; border-radius: var(--radius-sm);
   background: transparent; color: var(--text-2);
@@ -122,10 +127,11 @@ p.sub { color: var(--muted); margin: 6px 0 0; font-size: 13px; line-height: 1.5;
   transition: background .14s, color .14s, box-shadow .14s;
 }
 .nav-item svg {
-  display: block; flex: 0 0 18px; width: 18px; height: 18px;
+  display: block; justify-self: center;
+  width: 18px; height: 18px;
   color: var(--muted); transition: color .14s;
 }
-.nav-item span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-item span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nav-item:hover { background: var(--surface-3); color: var(--text); }
 .nav-item:hover svg { color: var(--text-2); }
 .nav-item.active {
@@ -234,12 +240,14 @@ p.sub { color: var(--muted); margin: 6px 0 0; font-size: 13px; line-height: 1.5;
 label { display: block; font-size: 12.5px; margin-bottom: 7px; color: var(--text-2); font-weight: 500; }
 label.row { display: flex; align-items: center; gap: 8px; margin: 10px 0; color: var(--text); font-weight: 400; }
 
-input[type="text"], input[type="password"], input[type="number"], input:not([type]), select, textarea {
+input[type="text"], input[type="password"], input[type="number"], input[type="date"],
+input[type="datetime-local"], input[type="time"], input[type="search"], input:not([type]), select, textarea {
   width: 100%; padding: 0 12px; height: 36px;
   border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
   font-size: 13.5px; background: #fff; color: var(--text); font-family: inherit;
   transition: border-color .14s, box-shadow .14s, background .14s;
 }
+input[type="date"]:disabled { background: var(--surface-3); color: var(--muted-2); }
 input::placeholder, textarea::placeholder { color: var(--muted-2); }
 input[type="checkbox"] { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
 textarea { height: auto; padding: 10px 12px; line-height: 1.6; }
@@ -303,6 +311,29 @@ button.link.danger { color: var(--danger); }
 
 .table-wrap { overflow-x: auto; }
 
+/* 表头冻结：必须由容器自己滚（overflow-y:auto + max-height），
+ * 只写 th{position:sticky} 是无效的——overflow-x:auto 会把容器变成
+ * 滚动上下文，而它的高度等于表格高度，永远滚不动。 */
+.table-wrap.freeze {
+  max-height: min(60vh, 620px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.table-wrap.freeze table { border-collapse: separate; border-spacing: 0; }
+.table-wrap.freeze thead th {
+  position: sticky; top: 0; z-index: 2;
+  background: var(--surface-2);
+  box-shadow: inset 0 -1px 0 var(--border);
+  padding-top: 11px; padding-bottom: 11px;
+}
+.table-wrap.freeze thead th:first-child { padding-left: 16px; }
+.table-wrap.freeze td:first-child { padding-left: 16px; }
+.table-wrap.freeze td:last-child, .table-wrap.freeze th:last-child { padding-right: 16px; }
+.table-wrap.freeze tbody tr:last-child td { border-bottom: 0; }
+
 table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 th {
   text-align: left; padding: 10px 12px; color: var(--muted);
@@ -311,7 +342,8 @@ th {
 }
 td { padding: 12px; border-bottom: 1px solid #f2f4f7; vertical-align: middle; font-variant-numeric: tabular-nums; }
 tbody tr:last-child td { border-bottom: 0; }
-table.data tbody tr:hover td, table.store-table tbody tr:hover td { background: #fafbfd; }
+table.data tbody tr:hover td,
+table.store-table tbody tr:not(.store-group-row):hover td { background: #fafbfd; }
 table.data td.mono { white-space: nowrap; }
 table.data td.check { width: 34px; }
 table.clients { margin-top: 8px; }
@@ -375,6 +407,30 @@ table.clients td { vertical-align: middle; }
   border: 1px dashed var(--border-strong); border-radius: var(--radius-md); font-size: 13px;
   background: var(--surface-2);
 }
+
+/* 用户到期：日期 + 剩余天数两行。过期划掉，7 天内提醒。 */
+td.expiry { white-space: nowrap; }
+td.expiry .when { font-variant-numeric: tabular-nums; }
+td.expiry .left { display: block; font-size: 11.5px; line-height: 1.45; color: var(--muted-2); }
+td.expiry.soon .left { color: var(--warn); }
+td.expiry.expired .when { color: var(--danger); text-decoration: line-through; }
+td.expiry.expired .left { color: var(--danger); }
+
+/* 行内复选框（「永久有效」这类紧贴输入框的小开关） */
+label.check-inline {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin: 0; font-size: 12.5px; font-weight: 400; color: var(--muted); white-space: nowrap;
+}
+
+/* 商店的组内分隔行（已安装 / 未安装） */
+tr.store-group-row td {
+  background: var(--surface-2);
+  padding: 9px 12px; border-bottom: 1px solid var(--border);
+  font-size: 12px; font-weight: 600; color: var(--text-2);
+  letter-spacing: .02em;
+}
+tr.store-group-row .store-group-name { margin-right: 8px; }
+tr.store-group-row td .badge { vertical-align: 1px; font-weight: 500; }
 
 /* ---------- 文件 ---------- */
 
@@ -468,9 +524,32 @@ textarea.link-box { resize: vertical; font-family: ui-monospace, Consolas, monos
 .site-card, .store-card { padding: 20px; }
 
 table.store-table { margin-top: 6px; }
-table.store-table td { vertical-align: top; }
-table.store-table td.sub { max-width: 320px; }
+table.store-table td { vertical-align: middle; }
+table.store-table td.sub { max-width: 340px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
 table.store-table td .row { flex-wrap: nowrap; }
+table.store-table .app-name { font-weight: 500; }
+table.store-table .app-slug { font-size: 11.5px; color: var(--muted-2); letter-spacing: -.01em; white-space: nowrap; }
+
+/* 软件 logo：品牌色圆角瓷片 + 白色线性图形，统一 36px。
+ * 整列同宽，扫视时行首是一条整齐的色带，比纯文字列表好认得多。 */
+.app-logo { display: block; flex: 0 0 auto; border-radius: 10px; overflow: hidden; }
+.app-logo svg { display: block; }
+.app-cell { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.app-cell .app-text { min-width: 0; }
+
+/* 商店分组标题：已安装 / 可安装 */
+.store-group + .store-group { margin-top: 24px; }
+.store-group-head {
+  display: flex; align-items: center; gap: 9px;
+  margin: 0 0 11px; padding: 0 2px;
+}
+.store-group-head h2 { margin: 0; }
+.store-group-head .sep {
+  flex: 1; height: 1px; background: var(--border); border-radius: 1px;
+}
+.store-head-empty {
+  color: var(--muted-2); font-size: 12.5px; padding: 2px 2px 0;
+}
 
 /* ---------- 登录 ---------- */
 
@@ -482,15 +561,22 @@ table.store-table td .row { flex-wrap: nowrap; }
     var(--bg);
 }
 .login-card {
-  width: 100%; max-width: 400px; padding: 32px;
+  width: 100%; max-width: 404px; padding: 34px 32px 30px;
   box-shadow: var(--shadow-lg); border-radius: 18px; border-color: #e8eaf0;
   animation: pop .2s cubic-bezier(.2, .8, .3, 1);
 }
-.login-card h1 { font-size: 19px; margin-bottom: 4px; }
-.login-brand { margin-bottom: 18px; }
-.login-brand .brand-mark { width: 42px; height: 42px; flex: 0 0 42px; border-radius: 12px; font-size: 14px; }
-.login-card .sub { margin-bottom: 24px; }
-.login-card button { width: 100%; height: 38px; margin-top: 4px; }
+.login-card h1 { font-size: 20px; margin-bottom: 5px; }
+.login-brand { display: flex; align-items: center; gap: 11px; margin-bottom: 22px; }
+.login-brand .brand-mark { width: 44px; height: 44px; flex: 0 0 44px; border-radius: 13px; font-size: 14.5px; }
+.login-card .sub { margin-bottom: 26px; }
+/* 按钮和输入框要拉开：之前紧贴密码框上沿（只差 4px），看着像粘在一起。 */
+.login-card .field { margin-bottom: 16px; }
+.login-card input[type="text"], .login-card input[type="password"], .login-card input:not([type]) {
+  height: 42px; font-size: 14px;
+}
+.login-actions { margin-top: 24px; }
+.login-actions button { width: 100%; height: 42px; font-size: 14px; }
+.login-card .msg { min-height: 20px; margin-top: 12px; text-align: center; }
 .login-card form { margin: 0; }
 
 /* ---------- 响应式 ---------- */
@@ -515,10 +601,18 @@ table.store-table td .row { flex-wrap: nowrap; }
     scrollbar-width: none;
   }
   .nav::-webkit-scrollbar { display: none; }
-  .nav-group { flex-direction: row; gap: 4px; }
+  /* 横排时按钮与分组都不能收缩：grid 的 1fr 列在 flex 收缩下会变成 0，
+     标题被压成一个字（之前 900px 下「概览」只剩「概」就是这个原因）。
+     分组本身也不能收缩，否则两组会互相叠在一起。 */
+  .nav-group { flex-direction: row; gap: 4px; flex: 0 0 auto; }
   .nav-label { display: none; }
-  .nav-item { padding: 0 10px; white-space: nowrap; width: auto; height: 34px; }
-  .nav-item span { flex: 0 0 auto; }
+  /* 横排时按钮不能收缩：grid 的 1fr 列在 flex 收缩下会变成 0，
+     标题被压成一个字（之前 900px 下「概览」只剩「概」就是这个原因）。 */
+  .nav-item {
+    grid-template-columns: 18px auto; flex: 0 0 auto;
+    padding: 0 10px; white-space: nowrap; width: auto; height: 34px;
+  }
+  .nav-item span { flex: 0 0 auto; overflow: visible; }
   .sidebar-foot { border-top: 0; padding-top: 0; flex-direction: row; align-items: center; }
   .sidebar-foot .user-chip { display: none; }
   .sidebar-foot button { width: 34px; padding: 0; font-size: 0; }
@@ -528,3 +622,8 @@ table.store-table td .row { flex-wrap: nowrap; }
   .topbar { margin-bottom: 18px; }
   h1 { font-size: 19px; }
 }
+
+/* 卡片模式下卡片高度由最高的那张决定：把操作按钮压到底，
+ * 一行里「查看步骤」就能对齐，不会出现长短不一的空白。 */
+.store-card { display: flex; flex-direction: column; }
+.store-card > .row:last-child { margin-top: auto; }

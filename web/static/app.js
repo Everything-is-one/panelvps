@@ -124,9 +124,10 @@ function renderLogin(message) {
   const btn = el("button", { type: "submit", text: "登录" });
 
   const form = el("form", {}, [
-    el("label", { text: "用户名" }), username,
-    el("label", { text: "密码", style: "margin-top:14px" }), password,
-    btn, msg,
+    field("用户名", username),
+    field("密码", password),
+    el("div", { class: "login-actions" }, [btn]),
+    msg,
   ]);
 
   form.addEventListener("submit", async (e) => {
@@ -151,9 +152,15 @@ function renderLogin(message) {
 
   app().className = "login-wrap";
   app().replaceChildren(el("div", { class: "card login-card" }, [
-    el("div", { class: "login-brand" }, [el("span", { class: "brand-mark", text: "PV" })]),
-    el("h1", { text: "PanelVPS" }),
-    el("p", { class: "sub", text: "轻量运维面板 · 请登录" }),
+    el("div", { class: "login-brand" }, [
+      el("span", { class: "brand-mark", text: "PV" }),
+      el("div", { class: "brand-text" }, [
+        el("strong", { text: "PanelVPS" }),
+        el("span", { text: "服务器面板" }),
+      ]),
+    ]),
+    el("h1", { text: "登录" }),
+    el("p", { class: "sub", text: "输入账号密码继续" }),
     form,
   ]));
   setTimeout(() => username.focus(), 50);
@@ -170,10 +177,11 @@ function renderChangePassword(forced) {
 
   const form = el("form", {}, [
     forced ? el("p", { class: "sub", text: "首次登录，请先设置新密码。" }) : null,
-    el("label", { text: "当前密码" }), oldPwd,
-    el("label", { text: "新密码", style: "margin-top:14px" }), newPwd,
-    el("label", { text: "确认新密码", style: "margin-top:14px" }), again,
-    btn, msg,
+    field("当前密码", oldPwd),
+    field("新密码", newPwd, "至少 12 位，且包含两类字符"),
+    field("确认新密码", again),
+    el("div", { class: "login-actions" }, [btn]),
+    msg,
   ]);
 
   form.addEventListener("submit", async (e) => {
@@ -207,27 +215,29 @@ function renderChangePassword(forced) {
 // ---------- 外壳 ----------
 
 // 导航图标：单路径线性图标，统一 24 视窗、1.7 描边。
-// 关键约束：所有图形的墨迹范围都控制在 4–20，否则同一列图标的光学大小
-// 会参差不齐（早期版本 relay 只占 10px 高、logs 只有 12px 宽，看起来就没对齐）。
+// 关键约束：所有图形的墨迹范围都控制在 x/y 的 4–20 之间（即 16×16 的
+// 中心方框），否则同一列图标的视觉宽度会差 1–2px，排起来就"不齐"。
+// 新增条目照这个尺子画，别再引入 3..21 那种 18 宽的图标。
 const NAV_ICONS = {
   overview: "M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z",
-  proxy: "M8 4 4 8l4 4M4 8h16M16 20l4-4-4-4M20 16H4",
+  proxy: "M4 8h16M8 4 4 8l4 4M20 16H4M16 12l4 4-4 4",
   relay: "M4 4h5v5H4zM15 15h5v5h-5zM9 6.5h6a2 2 0 0 1 2 2V15",
-  sites: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18M3 12h18M12 3c2.4 2.5 3.6 5.5 3.6 9s-1.2 6.5-3.6 9c-2.4-2.5-3.6-5.5-3.6-9S9.6 5.5 12 3",
-  files: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
-  terminal: "M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1M8 10l3 2.5L8 15M13 15h4",
-  firewall: "M12 3l8 3v6c0 5-3.4 8.2-8 9-4.6-.8-8-4-8-9V6z",
-  logs: "M8 6h12M8 12h12M8 18h8M4 6h.01M4 12h.01M4 18h.01",
-  store: "M4 8h16l-1.2 12H5.2zM8.5 8V6a3.5 3.5 0 0 1 7 0v2",
+  sites: "M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16M4 12h16M12 4c2.1 2.2 3.2 4.9 3.2 8S14.1 17.8 12 20c-2.1-2.2-3.2-4.9-3.2-8S9.9 6.2 12 4",
+  users: "M9 11.5a3.4 3.4 0 1 0 0-6.8 3.4 3.4 0 0 0 0 6.8M3.8 19.2v-1.1a4.9 4.9 0 0 1 4.9-4.9h1.1a4.9 4.9 0 0 1 4.9 4.9v1.1M15.8 4.9a3.3 3.3 0 0 1 0 6.4M16.4 13.3a4.5 4.5 0 0 1 3.8 4.5v1.4",
+  files: "M4 6.5A1.5 1.5 0 0 1 5.5 5h3.8l2 2h6.2A2.5 2.5 0 0 1 20 9.5V17a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z",
+  terminal: "M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v13A1.5 1.5 0 0 1 18.5 20h-13A1.5 1.5 0 0 1 4 18.5zM8 10l3 2.5L8 15M13 15h4",
+  firewall: "M12 4l7.8 2.9v5.2c0 4.6-3.2 7.7-7.8 8.8-4.6-1.1-7.8-4.2-7.8-8.8V6.9z",
+  logs: "M4 6h1.6M8 6h12M4 12h1.6M8 12h12M4 18h1.6M8 18h6",
+  store: "M4.5 8h15l-1 12h-13zM8.5 8V6.5a3.5 3.5 0 0 1 7 0V8",
   backup: "M4 7c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3m0 0v10c0 1.7 3.6 3 8 3s8-1.3 8-3V7M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
-  settings: "M4 7h6M14 7h6M4 17h10M18 17h2M12 4v6M8 14v6",
+  settings: "M4 7h4M12 7h8M4 17h8M16 17h4M10 5a2 2 0 1 0 0 4 2 2 0 0 0 0-4M14 15a2 2 0 1 0 0 4 2 2 0 0 0 0-4",
 };
 
 // 导航分组：条目多了以后平铺成一长列很难扫，按「网络 / 系统」分两段，
 // 段标题用小号灰字，视觉上形成节奏。
 const NAV_GROUPS = [
   ["", [["overview", "概览"]]],
-  ["网络", [["proxy", "代理"], ["relay", "中转"], ["sites", "网站"], ["firewall", "防火墙"]]],
+  ["网络", [["proxy", "代理"], ["users", "用户"], ["relay", "中转"], ["sites", "网站"], ["firewall", "防火墙"]]],
   ["系统", [["files", "文件"], ["terminal", "终端"], ["logs", "日志"],
             ["store", "商店"], ["backup", "备份"], ["settings", "设置"]]],
 ];
@@ -235,6 +245,7 @@ const NAV_GROUPS = [
 const VIEW_META = {
   overview: ["概览", "资源占用、系统环境与常用入口"],
   proxy: ["代理", "Xray 入站、用户与订阅"],
+  users: ["用户", "所有入站下的账号：流量、到期与状态"],
   relay: ["中转", "端口转发：把本机流量透传到目标地址"],
   sites: ["网站", "Nginx 站点与证书"],
   files: ["文件", "浏览、编辑服务器文件"],
@@ -326,6 +337,7 @@ function renderApp(view) {
 
   switch (state.view) {
     case "proxy": renderProxyView(content); break;
+    case "users": renderUsersView(content); break;
     case "relay": renderRelayView(content); break;
     case "sites": renderSitesView(content); break;
     case "files": renderFilesView(content); break;
@@ -467,7 +479,7 @@ function renderProxyView(root) {
     el("div", { class: "section card" }, [
       el("div", { class: "card-head" }, [
         el("h2", { text: "入站" }),
-        el("button", { class: "ghost", text: "+ 新建入站", onclick: () => inboundForm(root) }),
+        el("button", { class: "ghost", text: "+ 新建入站", onclick: () => inboundForm(null) }),
       ]),
       list,
     ]),
@@ -480,7 +492,7 @@ function renderProxyView(root) {
       state.proxies = data;
       paintStatus(statusLine, data.status, banner);
       if (document.activeElement !== hostInput) hostInput.value = data.host || "";
-      paintInbounds(list, data, root);
+      paintInbounds(list, data);
       err.textContent = "";
     } catch (e) {
       if (e.status === 401) { renderLogin("会话已失效，请重新登录"); return; }
@@ -513,15 +525,60 @@ function paintStatus(box, st, banner) {
   );
 }
 
-function paintInbounds(root, data, pageRoot) {
+function paintInbounds(root, data) {
   if (!data.inbounds.length) {
     root.replaceChildren(el("p", { class: "sub", text: "还没有入站。点击右上角「新建入站」开始。" }));
     return;
   }
-  root.replaceChildren.apply(root, data.inbounds.map((ib) => inboundCard(ib, data, pageRoot)));
+  root.replaceChildren.apply(root, data.inbounds.map((ib) => inboundCard(ib, data)));
 }
 
-function inboundCard(ib, data, pageRoot) {
+// ---------- 用户相关的展示小件 ----------
+
+function fmtDate(d) {
+  if (!(d instanceof Date) || isNaN(d.getTime())) return "—";
+  const p = (n) => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+}
+
+// 到期日不能只显示一个 - 号：用户最常问的就是「还剩几天」。
+// 这里同时给日期和剩余天数，过期用红色划掉，快到期用琥珀色。
+function expiryCell(ts, tag) {
+  const td = el("td", { class: "expiry" });
+  if (!ts) {
+    td.appendChild(el("span", { class: "when", text: "永久" }));
+    return td;
+  }
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) {
+    td.appendChild(el("span", { class: "when", text: "—" }));
+    return td;
+  }
+  const days = Math.ceil((d.getTime() - Date.now()) / 86400000);
+  const left = days < 0 ? "已过期 " + (-days) + " 天" : days === 0 ? "今天到期" : "剩 " + days + " 天";
+  if (days < 0) td.className = "expiry expired";
+  else if (days <= 7) td.className = "expiry soon";
+  td.appendChild(el("span", { class: "when", text: fmtDate(d) }));
+  td.appendChild(el("span", { class: "left", text: left }));
+  if (tag) td.title = tag;
+  return td;
+}
+
+// active 已经把「停用 / 过期 / 超额」三种情况都算进去了，但用户需要知道
+// 具体是哪一种，否则一排「受限」等于没说。
+function statusBadge(c) {
+  if (!c.enabled) return badge("已停用", "warn");
+  if (c.expires_at && new Date(c.expires_at).getTime() < Date.now()) return badge("已过期", "err");
+  if (c.total_bytes > 0 && c.up + c.down >= c.total_bytes) return badge("已超额", "err");
+  return c.active ? badge("正常", "ok") : badge("受限", "warn");
+}
+
+function usedCell(c) {
+  const used = fmtBytes(c.up + c.down);
+  return el("td", { class: "mono", text: c.total_bytes > 0 ? used + " / " + fmtBytes(c.total_bytes) : used });
+}
+
+function inboundCard(ib, data) {
   const meta = [
     ib.protocol.toUpperCase(),
     ib.network,
@@ -534,8 +591,9 @@ function inboundCard(ib, data, pageRoot) {
       : fmtBytes(c.up + c.down);
     const actions = el("div", { class: "row" }, [
       el("button", { class: "link", text: "链接", onclick: () => showLink(c) }),
-      el("button", { class: "link", text: c.enabled ? "禁用" : "启用", onclick: () => toggleClient(c, pageRoot) }),
-      el("button", { class: "link danger", text: "删除", onclick: () => removeClient(c, pageRoot) }),
+      el("button", { class: "link", text: "编辑", onclick: () => clientForm(ib, c) }),
+      el("button", { class: "link", text: c.enabled ? "禁用" : "启用", onclick: () => toggleClient(c) }),
+      el("button", { class: "link danger", text: "删除", onclick: () => removeClient(c) }),
     ]);
     return el("tr", {}, [
       el("td", {}, [
@@ -543,16 +601,18 @@ function inboundCard(ib, data, pageRoot) {
         el("div", { class: "mono muted", text: c.secret.slice(0, 18) + (c.secret.length > 18 ? "…" : "") }),
       ]),
       el("td", { class: "mono", text: quota }),
-      el("td", {}, [c.active ? badge("正常", "ok") : badge(c.enabled ? "受限" : "已禁用", "warn")]),
+      expiryCell(c.expires_at),
+      el("td", {}, [statusBadge(c)]),
       el("td", { class: "right" }, [actions]),
     ]);
   });
 
   const table = el("table", { class: "clients" }, [
     el("thead", {}, [el("tr", {}, [
-      el("th", { text: "用户" }), el("th", { text: "已用流量" }), el("th", { text: "状态" }), el("th", { text: "" }),
+      el("th", { text: "用户" }), el("th", { text: "已用流量" }), el("th", { text: "到期" }),
+      el("th", { text: "状态" }), el("th", { text: "" }),
     ])]),
-    el("tbody", {}, rows.length ? rows : [el("tr", {}, [el("td", { colspan: "4", class: "muted", text: "暂无用户" })])]),
+    el("tbody", {}, rows.length ? rows : [el("tr", {}, [el("td", { colspan: "5", class: "muted", text: "暂无用户" })])]),
   ]);
 
   const detail = ib.security === "reality"
@@ -580,11 +640,11 @@ function inboundCard(ib, data, pageRoot) {
         }),
       ]),
       el("div", { class: "row" }, [
-        el("button", { class: "ghost", text: "编辑", onclick: () => inboundForm(pageRoot, ib) }),
+        el("button", { class: "ghost", text: "编辑", onclick: () => inboundForm(ib) }),
         el("button", { class: "ghost", text: "复制链接", onclick: (ev) => copyInboundLink(ib, ev.target) }),
-        el("button", { class: "ghost", text: "+ 用户", onclick: () => clientForm(ib, pageRoot) }),
-        el("button", { class: "ghost", text: ib.enabled ? "停用" : "启用", onclick: () => toggleInbound(ib, pageRoot) }),
-        el("button", { class: "ghost danger", text: "删除", onclick: () => removeInbound(ib, pageRoot) }),
+        el("button", { class: "ghost", text: "+ 用户", onclick: () => clientForm(ib, null) }),
+        el("button", { class: "ghost", text: ib.enabled ? "停用" : "启用", onclick: () => toggleInbound(ib) }),
+        el("button", { class: "ghost danger", text: "删除", onclick: () => removeInbound(ib) }),
       ]),
     ]),
     table,
@@ -705,7 +765,7 @@ function randomPort() {
   return 20000 + Math.floor(Math.random() * 40000);
 }
 
-function inboundForm(root, existing) {
+function inboundForm(existing) {
   const o = (existing && existing.options) || {};
   const protocol = select(["vless", "vmess", "trojan", "shadowsocks"], existing ? existing.protocol : "vless");
   const network = select(["tcp", "ws", "grpc"], existing ? existing.network : "tcp");
@@ -834,30 +894,75 @@ function inboundForm(root, existing) {
   function closeModal() { m.close(); }
 }
 
-function clientForm(ib, root) {
-  const email = el("input", { placeholder: "用户标识，例如 alice" });
-  const quota = el("input", { type: "number", min: "0", placeholder: "0 表示不限" });
+function clientForm(ib, existing) {
+  const isEdit = !!existing;
+  const email = el("input", {
+    value: isEdit ? existing.email : "",
+    placeholder: "用户标识，例如 alice",
+  });
+  const quota = el("input", {
+    type: "number", min: "0", step: "0.1",
+    value: isEdit && existing.total_bytes > 0
+      ? String(Math.round(existing.total_bytes / 1073741824 * 100) / 100)
+      : "",
+    placeholder: "0 表示不限",
+  });
   const expiry = el("input", { type: "date" });
+  const forever = el("input", { type: "checkbox" });
+  const enabled = el("input", { type: "checkbox" });
+
+  if (isEdit && existing.expires_at) {
+    const d = new Date(existing.expires_at);
+    if (!isNaN(d.getTime())) expiry.value = fmtDate(d);
+  }
+  forever.checked = !(isEdit && existing.expires_at);
+  enabled.checked = isEdit ? !!existing.enabled : true;
+
+  const syncForever = () => {
+    expiry.disabled = forever.checked;
+    if (forever.checked) expiry.value = "";
+  };
+  forever.addEventListener("change", syncForever);
+  syncForever();
+
   const msg = el("div", { class: "msg" });
 
-  const submit = el("button", { text: "创建用户", onclick: async () => {
+  const submit = el("button", { text: isEdit ? "保存" : "创建用户", onclick: async () => {
+    if (!forever.checked && !expiry.value) {
+      msg.className = "msg err";
+      msg.textContent = "请选择到期日期，或勾选「永久有效」";
+      return;
+    }
     submit.disabled = true;
     msg.className = "msg";
-    msg.textContent = "创建中…";
-    const body = { email: email.value.trim(), total_bytes: 0 };
+    msg.textContent = isEdit ? "保存中…" : "创建中…";
+
+    const body = {
+      email: email.value.trim(),
+      total_bytes: 0,
+      enabled: enabled.checked,
+    };
     const gb = parseFloat(quota.value);
     if (!isNaN(gb) && gb > 0) body.total_bytes = Math.round(gb * 1024 * 1024 * 1024);
-    if (expiry.value) body.expires_at = new Date(expiry.value + "T23:59:59").toISOString();
+    if (!forever.checked && expiry.value) {
+      body.expires_at = new Date(expiry.value + "T23:59:59").toISOString();
+    } else if (isEdit) {
+      body.clear_expiry = true;
+    }
+
     try {
-      const r = await api("POST", "/api/v1/proxies/inbounds/" + ib.id + "/clients", body);
-      const a = r.apply;
+      const url = isEdit
+        ? "/api/v1/proxies/clients/" + existing.id
+        : "/api/v1/proxies/inbounds/" + ib.id + "/clients";
+      const r = await api(isEdit ? "PATCH" : "POST", url, body);
+      const a = r && r.apply;
       if (a && !a.ok) {
         msg.className = "msg err";
-        msg.textContent = "已创建但下发失败：" + a.message;
+        msg.textContent = "已保存但下发失败：" + a.message;
         submit.disabled = false;
         return;
       }
-      closeModal();
+      m.close();
       if (window.__proxyRefresh) window.__proxyRefresh();
     } catch (e) {
       msg.className = "msg err";
@@ -866,24 +971,48 @@ function clientForm(ib, root) {
     }
   } });
 
-  const m = modal("为 " + (ib.remark || ib.tag) + " 添加用户", [
+  const resetTraffic = isEdit ? el("button", { class: "ghost", text: "重置已用流量", onclick: async () => {
+    if (!confirm("把 " + existing.email + " 的上下行流量清零？配额与到期时间不变。")) return;
+    try {
+      await api("POST", "/api/v1/proxies/clients/" + existing.id + "/reset", {});
+      msg.className = "msg ok";
+      msg.textContent = "已清零";
+      if (window.__proxyRefresh) window.__proxyRefresh();
+    } catch (e) {
+      msg.className = "msg err";
+      msg.textContent = e.message;
+    }
+  } }) : null;
+
+  const title = isEdit
+    ? "编辑用户 · " + existing.email
+    : "为 " + (ib.remark || ib.tag) + " 添加用户";
+  const m = modal(title, [
     field("用户标识", email, "全局唯一；Xray 用它区分流量归属"),
-    field("流量配额（GB）", quota),
-    field("到期日期", expiry, "留空表示永久"),
-    submit,
+    el("div", { class: "row" }, [
+      field("流量配额（GB）", quota, "留空或 0 表示不限"),
+      field("到期日期", el("div", { class: "row", style: "gap:12px" }, [
+        expiry,
+        el("label", { class: "check-inline" }, [forever, el("span", { text: "永久有效" })]),
+      ]), "到期后 Xray 拒绝握手，可随时改"),
+    ]),
+    el("label", { class: "row", style: "margin-top:4px" }, [enabled, el("span", { text: "启用该用户" })]),
+    el("div", { class: "row wrap", style: "margin-top:16px" }, [submit, resetTraffic]),
     msg,
   ]);
-  function closeModal() { m.close(); }
 }
 
-async function toggleClient(c, root) {
+async function toggleClient(c) {
   try {
-    await api("PATCH", "/api/v1/proxies/clients/" + c.id, { email: c.email, enabled: !c.enabled, total_bytes: c.total_bytes });
+    await api("PATCH", "/api/v1/proxies/clients/" + c.id, {
+      email: c.email, enabled: !c.enabled, total_bytes: c.total_bytes,
+      expires_at: c.expires_at || undefined,
+    });
     if (window.__proxyRefresh) window.__proxyRefresh();
   } catch (e) { alert(e.message); }
 }
 
-async function removeClient(c, root) {
+async function removeClient(c) {
   if (!confirm("确定删除用户 " + c.email + "？该操作会立刻断开其连接。")) return;
   try {
     await api("DELETE", "/api/v1/proxies/clients/" + c.id, {});
@@ -891,19 +1020,153 @@ async function removeClient(c, root) {
   } catch (e) { alert(e.message); }
 }
 
-async function toggleInbound(ib, root) {
+async function toggleInbound(ib) {
   try {
     await api("PATCH", "/api/v1/proxies/inbounds/" + ib.id, { enabled: !ib.enabled });
     if (window.__proxyRefresh) window.__proxyRefresh();
   } catch (e) { alert(e.message); }
 }
 
-async function removeInbound(ib, root) {
+async function removeInbound(ib) {
   if (!confirm("确定删除入站 " + (ib.remark || ib.tag) + "？其下所有用户会一并删除。")) return;
   try {
     await api("DELETE", "/api/v1/proxies/inbounds/" + ib.id, {});
     if (window.__proxyRefresh) window.__proxyRefresh();
   } catch (e) { alert(e.message); }
+}
+
+// ---------- 用户管理 ----------
+
+// 代理页是「按入站看用户」，用户多了以后没人愿意一个一个入站点开找。
+// 这里把所有入站下的用户摊平成一张表，流量 / 到期 / 状态 / 编辑都在一处。
+function renderUsersView(root) {
+  const summary = el("div", { class: "grid" });
+  const search = el("input", { placeholder: "搜索用户或入站…", style: "max-width:240px" });
+  const filter = select([
+    ["all", "全部用户"], ["active", "正常"], ["expiring", "7 天内到期"],
+    ["expired", "已过期"], ["disabled", "已停用"],
+  ], "all");
+  filter.style.maxWidth = "170px";
+  const wrap = el("div", { class: "table-wrap freeze" });
+  const msg = el("div", { class: "msg" });
+  const foot = el("div", { class: "hint" });
+  let data = { inbounds: [] };
+
+  const dayLeft = (ts) => ts ? Math.ceil((new Date(ts).getTime() - Date.now()) / 86400000) : null;
+
+  const paint = () => {
+    const q = search.value.trim().toLowerCase();
+    const mode = filter.value;
+    const rows = [];
+
+    let total = 0, expired = 0, soon = 0, disabled = 0, traffic = 0;
+    for (const ib of data.inbounds) {
+      for (const c of ib.clients) {
+        total++;
+        traffic += (c.up || 0) + (c.down || 0);
+        const left = dayLeft(c.expires_at);
+        if (!c.enabled) disabled++;
+        else if (left !== null && left < 0) expired++;
+        else if (left !== null && left <= 7) soon++;
+
+        if (q && !(c.email + " " + (ib.remark || "") + " " + ib.tag).toLowerCase().includes(q)) continue;
+        const isExpired = left !== null && left < 0;
+        if (mode === "active" && (!c.enabled || isExpired)) continue;
+        if (mode === "expiring" && !(c.enabled && left !== null && left >= 0 && left <= 7)) continue;
+        if (mode === "expired" && !isExpired) continue;
+        if (mode === "disabled" && c.enabled) continue;
+
+        rows.push(el("tr", {}, [
+          el("td", {}, [
+            el("div", { class: "app-name", text: c.email }),
+            el("div", { class: "mono muted", text: c.secret.slice(0, 16) + (c.secret.length > 16 ? "…" : "") }),
+          ]),
+          el("td", {}, [
+            el("div", { text: ib.remark || ib.tag }),
+            el("div", { class: "hint mono", text: ib.protocol.toUpperCase() + " · :" + ib.port }),
+          ]),
+          usedCell(c),
+          expiryCell(c.expires_at),
+          el("td", {}, [statusBadge(c)]),
+          el("td", {}, [el("div", { class: "row" }, [
+            el("button", { class: "link", text: "链接", onclick: () => showLink(c) }),
+            el("button", { class: "link", text: "编辑", onclick: () => clientForm(ib, c) }),
+            el("button", { class: "link", text: c.enabled ? "禁用" : "启用", onclick: () => toggleClient(c) }),
+            el("button", { class: "link danger", text: "删除", onclick: () => removeClient(c) }),
+          ])]),
+        ]));
+      }
+    }
+
+    summary.replaceChildren(
+      statCard("用户总数", String(total), data.inbounds.length + " 个入站"),
+      statCard("7 天内到期", String(soon), soon ? "记得提前续期" : "暂无"),
+      statCard("已过期", String(expired), expired ? "这些用户已无法连接" : "暂无"),
+      statCard("已停用", String(disabled), "手动关闭的账号"),
+    );
+
+    wrap.replaceChildren(rows.length
+      ? el("table", { class: "data store-table" }, [
+        el("thead", {}, [el("tr", {}, ["用户", "所属入站", "已用流量", "到期", "状态", "操作"]
+          .map((h) => el("th", { text: h })))]),
+        el("tbody", {}, rows),
+      ])
+      : emptyHint(data.inbounds.length ? "没有符合条件的用户" : "还没有用户：先到「代理」页建一个入站，再给入站加用户"));
+    foot.textContent = "共 " + total + " 位用户 · 累计流量 " + fmtBytes(traffic)
+      + (rows.length !== total ? " · 当前筛出 " + rows.length + " 位" : "");
+  };
+
+  const load = async () => {
+    try {
+      data = await api("GET", "/api/v1/proxies");
+      msg.textContent = "";
+      paint();
+    } catch (e) {
+      if (e.status === 401) { renderLogin("会话已失效，请重新登录"); return; }
+      msg.className = "msg err";
+      msg.textContent = e.message;
+    }
+  };
+
+  search.addEventListener("input", paint);
+  filter.addEventListener("change", paint);
+  window.__proxyRefresh = load;
+
+  root.replaceChildren(
+    summary,
+    card("用户", [
+      el("div", { class: "row wrap" }, [
+        search, filter,
+        el("button", { text: "+ 新建用户", onclick: () => quickUserForm() }),
+        el("button", { class: "ghost", text: "刷新", onclick: load }),
+      ]),
+      msg, wrap, foot,
+    ]),
+  );
+  load();
+}
+
+// 用户页的「新建」不先选入站会很别扭，所以先让用户挑一个入站再开表单。
+function quickUserForm() {
+  api("GET", "/api/v1/proxies").then((d) => {
+    if (!(d.inbounds || []).length) {
+      modal("先创建入站", [el("p", { class: "sub", text: "还没有任何入站，用户在入站下创建。去「代理」页新建一个入站吧。" })]);
+      return;
+    }
+    const known = d.inbounds.filter((ib) => ib.enabled);
+    const list = known.length ? known : d.inbounds;
+    const sel = select(list.map((ib) => [String(ib.id), (ib.remark || ib.tag) + " · " + ib.protocol.toUpperCase() + " :" + ib.port]), String(list[0].id));
+    const m = modal("选择入站", [
+      field("入站", sel, "用户归属哪个入站，决定协议与端口"),
+      el("div", { class: "row" }, [
+        el("button", { text: "下一步", onclick: () => {
+          const ib = list.find((x) => String(x.id) === sel.value);
+          m.close();
+          clientForm(ib, null);
+        } }),
+      ]),
+    ]);
+  }).catch((e) => alert(e.message));
 }
 
 // ---------- 通用小部件 ----------
@@ -941,7 +1204,7 @@ function emptyHint(text) {
 function renderFilesView(root) {
   let cwd = "";
   const pathBar = el("div", { class: "path-bar mono", text: "/" });
-  const listBox = el("div");
+  const listBox = el("div", { class: "table-wrap freeze" });
   const msg = el("div", { class: "msg" });
   const selected = new Set();
   const fileInput = el("input", { type: "file", multiple: true, style: "display:none" });
@@ -1130,7 +1393,7 @@ function renderFilesView(root) {
       ]));
     }
     if (!rows.length) {
-      listBox.replaceChildren(emptyHint("空目录"));
+      listBox.replaceChildren(el("div", { class: "hint", style: "padding:28px;text-align:center", text: "空目录" }));
       return;
     }
     listBox.replaceChildren(simpleTable(["", "名称", "大小", "修改时间", "操作"], rows));
@@ -1925,12 +2188,77 @@ function siteForm(reload, meta) {
 
 // ---------- 软件商店 ----------
 
+// 软件 logo：品牌色圆角瓷片 + 白色线性图形（24 网格，统一 1.9 描边）。
+// 不引外链图片：面板经常部署在没外网 DNS 的机器上，图片挂了整列都会变成碎图标。
+const APP_LOGOS = {
+  nginx: { bg: "#009639", d: "M6 18.5V5.5l12 13V5.5" },
+  docker: {
+    bg: "#2496ED",
+    d: "M4 15h16c0 2.8-2.4 5-5.6 5H9.6C6.4 20 4 17.8 4 15zM6.5 11.8h3v3h-3zM10.5 11.8h3v3h-3zM14.5 11.8h3v3h-3z",
+  },
+  redis: { bg: "#D63A2F", d: "M4 8.5 12 4.5l8 4-8 4zM4 12.2l8 4 8-4M4 15.9l8 4 8-4" },
+  mariadb: {
+    bg: "#003545",
+    d: "M4 7c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3m0 0v10c0 1.7 3.6 3 8 3s8-1.3 8-3V7M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
+  },
+  php: { bg: "#777BB4", d: "M8.5 7.5 4.5 12l4 4.5M15.5 7.5l4 4.5-4 4.5M13 5.5 11 18.5" },
+  git: {
+    bg: "#F05032",
+    d: "M7 6.7v10.6M8.7 14.5h4.3a4 4 0 0 0 4-4V8.7M5.3 5a1.7 1.7 0 1 0 3.4 0 1.7 1.7 0 1 0-3.4 0M5.3 17a1.7 1.7 0 1 0 3.4 0 1.7 1.7 0 1 0-3.4 0M15.3 7a1.7 1.7 0 1 0 3.4 0 1.7 1.7 0 1 0-3.4 0",
+  },
+  htop: { bg: "#0F766E", d: "M5 18V10M10 18V5M15 18v-5M20 18V8M4 20.5h16" },
+  curl: { bg: "#1B4B66", d: "M12 4v12M8 12l4 4 4-4M4 20h16" },
+  certbot: {
+    bg: "#2C6ECB",
+    d: "M12 4l7 2.6v5c0 4.3-2.9 7.2-7 8.3-4.1-1.1-7-4-7-8.3v-5zM9 11.5l2.2 2.2 4.3-4.3",
+  },
+  unzip: { bg: "#C2801A", d: "M5 4.5h14v15H5zM12 4.5v15M12 7.5h2M12 10.5h-2M12 13.5h2M12 16.5h-2" },
+  xray: { bg: "#5B4BE0", d: "M5 5l14 14M19 5 5 19" },
+  sqlite3: { bg: "#0F4C81", d: "M5 19c6.5 1 12.5-4 14-14-8.5 0-13.5 5-14 14zM5 19l7.5-7.5" },
+};
+
+function appLogo(slug, size) {
+  const s = size || 36;
+  const meta = APP_LOGOS[slug] || { bg: "#64748b", d: "M7 7h10v10H7z" };
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 36 36");
+  svg.setAttribute("width", s);
+  svg.setAttribute("height", s);
+  svg.setAttribute("class", "app-logo");
+  svg.setAttribute("aria-hidden", "true");
+
+  const rect = document.createElementNS(ns, "rect");
+  rect.setAttribute("width", "36");
+  rect.setAttribute("height", "36");
+  rect.setAttribute("rx", "10");
+  rect.setAttribute("fill", meta.bg);
+
+  const g = document.createElementNS(ns, "g");
+  g.setAttribute("transform", "translate(6 6)");
+  g.setAttribute("fill", "none");
+  g.setAttribute("stroke", "#fff");
+  g.setAttribute("stroke-width", "1.9");
+  g.setAttribute("stroke-linecap", "round");
+  g.setAttribute("stroke-linejoin", "round");
+  g.setAttribute("opacity", ".96");
+  const p = document.createElementNS(ns, "path");
+  p.setAttribute("d", meta.d);
+  g.appendChild(p);
+
+  svg.appendChild(rect);
+  svg.appendChild(g);
+  return svg;
+}
+
 function renderStoreView(root) {
   const search = el("input", { placeholder: "搜索软件…", style: "max-width:240px" });
   const cat = select([["", "全部类别"]], "");
   const viewSel = select([["list", "列表"], ["card", "卡片"]], localStorage.getItem("pv-store-view") || "list");
-  const grid = el("div", { class: "grid g2" });
-  const listBox = el("div", { class: "table-wrap" });
+  cat.style.maxWidth = "160px";
+  viewSel.style.maxWidth = "110px";
+  const grid = el("div");
+  const listBox = el("div", { class: "table-wrap freeze" });
   const msg = el("div", { class: "msg" });
   let all = [];
   let supported = true;
@@ -1945,19 +2273,26 @@ function renderStoreView(root) {
 
   const paint = () => {
     const items = matches();
+    // 已安装永远排在最上面：用户回商店十次有九次是来看「我装了什么 / 能不能卸」，
+    // 混在一起按 slug 排序会让已安装项散落在中间。
+    const installed = items.filter((m) => m.installed);
+    const rest = items.filter((m) => !m.installed);
     const listMode = viewSel.value === "list";
     grid.style.display = listMode ? "none" : "";
     listBox.style.display = listMode ? "" : "none";
     localStorage.setItem("pv-store-view", viewSel.value);
     if (!items.length) {
-      grid.replaceChildren(emptyHint("没有匹配的软件"));
+      grid.replaceChildren();
       listBox.replaceChildren(emptyHint("没有匹配的软件"));
       return;
     }
     if (listMode) {
-      listBox.replaceChildren(storeTable(items, supported, () => load()));
+      listBox.replaceChildren(storeTable(installed, rest, supported, () => load()));
     } else {
-      grid.replaceChildren.apply(grid, items.map((m) => storeCard(m, supported, () => load())));
+      grid.replaceChildren.apply(grid, [
+        storeGroup("已安装", installed, "ok", supported, () => load()),
+        storeGroup("可安装", rest, "muted", supported, () => load()),
+      ].filter(Boolean));
     }
   };
 
@@ -1993,30 +2328,63 @@ function renderStoreView(root) {
   load();
 }
 
+// 卡片视图的分组：标题 + 数量，下面接一组卡片。
+function storeGroup(label, items, kind, supported, reload) {
+  if (!items.length) return null;
+  return el("div", { class: "store-group" }, [
+    el("div", { class: "store-group-head" }, [
+      el("h2", { text: label }),
+      badge(String(items.length), kind),
+      el("div", { class: "sep" }),
+    ]),
+    el("div", { class: "grid g2" }, items.map((m) => storeCard(m, supported, reload))),
+  ]);
+}
+
 // storeTable 用表格展示，适合一眼扫过全部软件与安装状态。
-function storeTable(items, supported, reload) {
+// 已安装 / 未安装用一条组内分隔行分开，表头只有一份且冻结在容器顶部。
+function storeTable(installed, rest, supported, reload) {
   const head = el("tr", {}, ["软件", "类别", "说明", "内存", "磁盘", "状态", "操作"]
     .map((h) => el("th", { text: h })));
-  const rows = items.map((m) => {
-    const acts = storeActions(m, supported, reload);
-    return el("tr", {}, [
-      el("td", {}, [
-        el("div", { text: m.name }),
-        el("div", { class: "hint mono", text: m.slug + " · " + m.version }),
+  const body = el("tbody");
+
+  const group = (label, items, kind) => {
+    if (!items.length) return;
+    body.appendChild(el("tr", { class: "store-group-row" }, [
+      el("td", { colspan: "7" }, [
+        el("span", { class: "store-group-name", text: label }),
+        badge(String(items.length), kind),
       ]),
-      el("td", { text: m.category || "-" }),
-      el("td", { class: "sub", text: m.summary }),
-      el("td", { class: "mono", text: m.memory_mb + "MB" }),
-      el("td", { class: "mono", text: m.disk_mb + "MB" }),
-      el("td", {}, [
-        m.installed
-          ? badge(m.installed_version ? "已装 " + m.installed_version : "已安装", "ok")
-          : badge(riskText[m.risk] || m.risk, m.risk === "high" ? "err" : m.risk === "medium" ? "warn" : "muted"),
+    ]));
+    items.forEach((m) => body.appendChild(storeRow(m, supported, reload)));
+  };
+  group("已安装", installed, "ok");
+  group("未安装", rest, "muted");
+
+  return el("table", { class: "store-table" }, [el("thead", {}, [head]), body]);
+}
+
+function storeRow(m, supported, reload) {
+  const acts = storeActions(m, supported, reload);
+  return el("tr", {}, [
+    el("td", {}, [el("div", { class: "app-cell" }, [
+      appLogo(m.slug),
+      el("div", { class: "app-text" }, [
+        el("div", { class: "app-name", text: m.name }),
+        el("div", { class: "mono app-slug", text: m.slug + " · " + m.version }),
       ]),
-      el("td", {}, [el("div", { class: "row wrap" }, acts)]),
-    ]);
-  });
-  return el("table", { class: "store-table" }, [el("thead", {}, [head]), el("tbody", {}, rows)]);
+    ])]),
+    el("td", { text: m.category || "-" }),
+    el("td", { class: "sub", text: m.summary }),
+    el("td", { class: "mono", text: m.memory_mb + "MB" }),
+    el("td", { class: "mono", text: m.disk_mb + "MB" }),
+    el("td", {}, [
+      m.installed
+        ? badge(m.installed_version ? "已装 " + m.installed_version : "已安装", "ok")
+        : badge(riskText[m.risk] || m.risk, m.risk === "high" ? "err" : m.risk === "medium" ? "warn" : "muted"),
+    ]),
+    el("td", {}, [el("div", { class: "row wrap" }, acts)]),
+  ]);
 }
 
 const riskText = { low: "低风险", medium: "中风险", high: "高风险" };
@@ -2065,7 +2433,13 @@ function storeCard(m, supported, reload) {
 
   return el("div", { class: "card store-card" }, [
     el("div", { class: "row spread" }, [
-      el("div", {}, [el("h3", { text: m.name }), el("div", { class: "hint mono", text: m.slug + " · " + m.version })]),
+      el("div", { class: "app-cell" }, [
+        appLogo(m.slug, 40),
+        el("div", { class: "app-text" }, [
+          el("h3", { text: m.name }),
+          el("div", { class: "hint mono", text: m.slug + " · " + m.version }),
+        ]),
+      ]),
       m.installed ? badge("已安装", "ok") : badge(riskText[m.risk] || m.risk, m.risk === "high" ? "err" : m.risk === "medium" ? "warn" : "muted"),
     ]),
     el("p", { class: "sub", text: m.summary }),

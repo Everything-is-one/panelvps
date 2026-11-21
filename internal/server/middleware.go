@@ -54,6 +54,10 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 		h.Set("Content-Security-Policy",
 			"default-src 'self'; base-uri 'none'; form-action 'self'; "+
 				"frame-ancestors 'none'; object-src 'none'; connect-src 'self'; "+
+				// 下拉框的箭头是 CSS 里的内联 SVG（data:image/svg+xml），
+				// 不放行 data: 就只剩一个没有箭头、看不出能点的白框。
+				// img-src 只放 data: 图片，不涉及脚本执行面。
+				"img-src 'self' data:; "+
 				// 前端是零构建的原生 JS，进度条宽度、弹窗间距等直接用 style 属性；
 				// 页面文本全部走 textContent，不存在把用户输入当 HTML 解析的路径。
 				"style-src 'self' 'unsafe-inline'")
