@@ -17,7 +17,7 @@ PanelVPS 用一个 **≤ 50MB 的 Go 单二进制**，同时提供：
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | M0 | 骨架：CLI、SQLite、认证、会话、安全默认值、embed 前端、healthz | ✅ 已完成 |
-| M1 | 代理：Xray 编排、入站/客户端、流量统计、分享链接 | ⬜ 未开始 |
+| M1 | 代理：Xray 编排、入站/客户端、流量统计、分享链接 | ✅ 已完成 |
 | M2 | 运维：监控、文件、终端、防火墙、日志 | ⬜ 未开始 |
 | M3 | 网站与商店：站点/证书/PHP、声明式软件商店 | ⬜ 未开始 |
 | M4 | 打磨：备份、告警、自更新、签名发布 | ⬜ 未开始 |
@@ -98,6 +98,50 @@ panelvps reset-password   # 重置为随机密码并踢掉所有会话
 > M0 的前端是零构建原生 JS（约 300 行），目的是让 `go build` 不依赖 Node。
 > M1 接入 Vite + Vue 3 后产物仍 embed 到同一位置，二进制接口不变。
 
+## M1 已实现的契约
+
+| 能力 | 说明 |
+|---|---|
+| 协议 | VLESS（REALITY / TLS / 无加密）、VMess、Trojan、Shadowsocks（2022 多用户） |
+| 传输 | TCP、WebSocket、gRPC；REALITY 限 tcp/grpc |
+| 配置下发 | 生成 → `xray -test` → 备份 → 原子替换 → 重启 → 等端口就绪；任一步失败自动回滚 |
+| 进程托管 | 子进程 + 指数退避重拉（1s→30s），面板退出时一并收掉，不留孤儿 |
+| 流量统计 | 走 `xray api statsquery`，不引入 gRPC/protobuf 依赖；游标做差，进程重启不清零 |
+| 配额 | 超额/到期自动禁用并重建配置，界面状态与实际一致 |
+| 分享链接 | vless / vmess / trojan / ss 四种；二维码服务端生成，前端零依赖 |
+| 密钥 | REALITY X25519 密钥对、UUIDv4、SS-2022 定长 PSK 均由服务端生成 |
+
+**M1 实测结论**（2026-11-21，Windows + Xray 26.11.9）：
+
+- 五种入站组合生成的配置全部通过真实 `xray -test`
+- 客户端经 VLESS 入站访问 `gstatic/generate_204` 返回 204、访问 `api.github.com` 返回 200
+- 流量准确记到对应用户名下（`alice` 独占总量，另两人为 0）
+- 把配额改成 1000 字节后，下一次采样自动禁用该用户并把其从配置中剔除
+
+## 代理接口
+
+```
+GET    /api/v1/proxies                     概览（状态 + 入站 + 用户 + 链接）
+POST   /api/v1/proxies/apply               重建并下发配置
+POST   /api/v1/proxies/traffic/collect     立即采样一次流量
+PUT    /api/v1/proxies/preferences          设置分享链接用的公网地址
+POST   /api/v1/proxies/keys/reality         生成 REALITY 密钥对
+POST   /api/v1/proxies/inbounds             新建入站
+PATCH  /api/v1/proxies/inbounds/{id}        修改入站（部分字段）
+DELETE /api/v1/proxies/inbounds/{id}        删除入站（级联删除用户）
+POST   /api/v1/proxies/inbounds/{id}/clients 新建用户
+PATCH  /api/v1/proxies/clients/{id}         修改用户
+DELETE /api/v1/proxies/clients/{id}         删除用户
+POST   /api/v1/proxies/clients/{id}/reset   重置流量
+GET    /api/v1/proxies/clients/{id}/links   分享链接
+GET    /api/v1/proxies/clients/{id}/qr      二维码 PNG
+```
+
+Xray 可执行文件按以下顺序探测：`PANELVPS_XRAY_BIN` 环境变量 → 配置项 `xray_bin`
+→ `/usr/local/bin/xray` → `/usr/bin/xray` → 面板同目录 → `PATH`。
+找不到时面板照常启动，只是代理页显示「不可用」。
+
+
 ## 目录结构
 
 ```
@@ -106,8 +150,9 @@ internal/
   auth/              密码哈希、密码策略、会话令牌、登录限流
   config/            YAML 配置与校验
   metrics/           /proc 指标采集
-  server/            路由、中间件、API 处理器
-  store/             SQLite 访问层与迁移
+  server/            路由、中间件、API 处理器（含 proxies 模块）
+  store/             SQLite 访问层与迁移（用户 / 会话 / 入站 / 客户端 / 流量）
+  xray/              配置生成、进程托管、统计读取、分享链接与二维码
   version/           构建期注入的版本信息
 web/                 embed 的前端静态资源
 deploy/              systemd 单元与安装脚本
