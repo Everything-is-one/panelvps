@@ -353,6 +353,10 @@ button.link {
 button.link:hover { background: none; box-shadow: none; text-decoration: underline; text-underline-offset: 2px; }
 button.link.danger { color: var(--danger); }
 
+/* 小号按钮：表格行内、终端状态行这类「辅助动作」用。
+ * 38px 的实心块紧挨着一行 13px 的文字会抢走全部视觉重量。 */
+button.btn-sm { height: 28px; padding: 0 10px; font-size: 12.5px; border-radius: 7px; }
+
 /* ---------- 表格 ---------- */
 
 .table-wrap { overflow-x: auto; }
@@ -460,6 +464,12 @@ table.clients td { vertical-align: middle; }
   gap: 12px; flex-wrap: wrap;
 }
 .banner.update-banner button { flex: 0 0 auto; }
+/* 横幅与后面的工具栏 / 表格之间要留呼吸：两者都是块级元素，
+ * 紧挨着会贴成一条边（网站页「Nginx 不可用」就贴着「新建站点」）。
+ * 用相邻兄弟选择器而不是给 .banner 加 margin-bottom，
+ * 免得横幅出现在卡片末尾时多出一截空白。 */
+.banner + .toolbar, .banner + .row, .banner + .grid,
+.banner + table, .banner + .table-wrap, .banner + .msg { margin-top: 12px; }
 .warn-box {
   background: var(--warn-soft); border: 1px solid #fdeccd; border-left: 3px solid #f79009;
   color: #7a3b05; border-radius: var(--radius-xs); padding: 10px 13px;
@@ -593,12 +603,54 @@ textarea.link-box { resize: vertical; font-family: ui-monospace, Consolas, monos
 .site-card .hint, .store-card .hint { margin-top: 3px; }
 .site-card, .store-card { padding: 20px; }
 
-table.store-table { margin-top: 6px; }
+/* 固定布局 + 显式列宽。auto 布局下浏览器会把「说明」压成 5 行高，
+ * 却给状态列留 290px，最后整张表横向溢出、操作列被裁掉。
+ * 说明列吃剩余宽度，数字列按内容收窄，状态 / 操作定宽。 */
+table.store-table { margin-top: 6px; table-layout: fixed; }
+/* 用百分比而不是固定 px：容器从 640 到 1100 都能按比例分，
+ * 说明列固定拿 19.5%（窄屏隐藏两列后是 35.5%）。 */
+table.store-table th:nth-child(1) { width: 24%; }
+table.store-table th:nth-child(2) { width: 9.5%; }
+table.store-table th:nth-child(3) { width: auto; }
+table.store-table th:nth-child(4),
+table.store-table th:nth-child(5) { width: 6.5%; padding-left: 6px; padding-right: 6px; }
+table.store-table th:nth-child(6) { width: 17%; }
+table.store-table th:nth-child(7) { width: 17%; }
+
 table.store-table td { vertical-align: middle; }
-table.store-table td.sub { max-width: 340px; color: var(--muted); font-size: 13.5px; line-height: 1.5; }
-table.store-table td .row { flex-wrap: nowrap; }
+table.store-table td.sub { color: var(--muted); font-size: 13.5px; line-height: 1.45; }
+/* 说明最多两行，超出截断，悬停看全文（title 由 JS 写） */
+.clamp2 {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; overflow-wrap: anywhere;
+}
+table.store-table td .row { flex-wrap: nowrap; gap: 8px; }
+table.store-table .app-name, table.store-table .app-slug {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 table.store-table .app-name { font-weight: 500; }
-table.store-table .app-slug { font-size: 12px; color: var(--muted-2); letter-spacing: -.01em; white-space: nowrap; }
+table.store-table .app-slug { font-size: 12px; color: var(--muted-2); letter-spacing: -.01em; }
+/* 状态列只放一个短标签，长版本号在 JS 里已经截短，这里再兜一层：
+ * 文本包在 .badge-text 里才能走 ellipsis——badge 自身是 nowrap 的
+ * inline-flex，直接塞文本只能被硬裁。 */
+table.store-table td .badge { max-width: 100%; }
+.badge > .badge-text {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ≤1180 主区只剩 ~740px：先收起「类别」「磁盘」两列，
+ * 保证说明与操作列不被挤爆。宁可少一列，也不要横向滚动条。 */
+@media (max-width: 1180px) {
+  /* 窄屏下退回 auto 布局：fixed 布局里被 display:none 的列仍占着网格位置
+   * （实测空了 150px），auto 才会真正把它们收掉。 */
+  table.store-table { table-layout: auto; }
+  table.store-table th:nth-child(2), table.store-table td:nth-child(2),
+  table.store-table th:nth-child(5), table.store-table td:nth-child(5) { display: none; }
+  /* auto 布局按内容定宽：超长版本号会把状态列撑到 180px、把说明挤成 91px。
+   * 给说明一个百分比下限，同时硬性限制状态标签宽度（超出走 ellipsis）。 */
+  table.store-table th:nth-child(3) { width: 34%; }
+  table.store-table td:nth-child(6) .badge { max-width: 108px; }
+}
 
 /* 软件 logo：品牌色圆角瓷片 + 白色线性图形，统一 36px。
  * 整列同宽，扫视时行首是一条整齐的色带，比纯文字列表好认得多。 */
@@ -794,26 +846,36 @@ table.du-table td.du-name { max-width: 320px; overflow: hidden; text-overflow: e
 
 /* ---------- 终端标签 ---------- */
 
+/* 标签贴一条底线，标签自身只留上圆角、底边不画：
+ * 否则 active 标签的下边框会和容器底线叠成两道。
+ * align-items:flex-end 让标签与底线咬合，而不是浮在中间。 */
 .term-tabs {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  border-bottom: 1px solid var(--border); margin: 14px 0 0;
+  display: flex; align-items: flex-end; gap: 4px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--border); margin: 16px 0 0;
 }
 .term-tab {
-  display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 8px 0 12px;
-  border: 1px solid transparent; border-bottom: none; border-radius: 10px 10px 0 0;
+  display: flex; align-items: center; gap: 7px; height: 32px; padding: 0 6px 0 11px;
+  border: 1px solid transparent; border-bottom: none; border-radius: 8px 8px 0 0;
   cursor: pointer; font-size: 13px; color: var(--muted); position: relative; top: 1px;
   user-select: none;
 }
 .term-tab:hover { background: var(--surface-3); color: var(--text); }
 .term-tab.active { background: var(--surface); border-color: var(--border); color: var(--text); font-weight: 600; }
-.term-tab-label { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-tab-label { max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 关闭按钮要把全局 button 的 height / box-shadow 全部复位：
+ * 全局按钮是 38px 高的实心块，塞进 32px 的标签里会顶出标签边界，
+ * 半透明底叠上 box-shadow，看着就像标签外面挂了个方框。 */
 .term-tab-close {
-  border: 0; background: transparent; color: var(--muted-2); cursor: pointer;
-  font-size: 15px; line-height: 1; padding: 2px 5px; border-radius: 6px;
+  width: 20px; height: 20px; padding: 0; border: 0; box-shadow: none; flex: 0 0 20px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: var(--muted-2); cursor: pointer;
+  font-size: 14px; line-height: 1; border-radius: 5px;
 }
 .term-tab-close:hover { background: var(--danger-soft); color: var(--danger); }
 .term-tab-add {
-  height: 30px; padding: 0 10px; font-size: 12.5px; border-radius: 8px;
+  height: 26px; padding: 0 9px; margin-bottom: 4px; box-shadow: none;
+  font-size: 12.5px; border-radius: 7px;
   border: 1px dashed var(--border-strong); background: transparent; color: var(--muted); cursor: pointer;
 }
 .term-tab-add:hover { color: var(--accent); border-color: var(--accent-border); }
@@ -821,9 +883,15 @@ table.du-table td.du-name { max-width: 320px; overflow: hidden; text-overflow: e
 .term-dot.open { background: var(--ok); }
 .term-dot.connecting { background: var(--warn); }
 .term-dot.error { background: var(--danger); }
+
+/* 会话状态行：左边状态点 + 尺寸，右边清屏 / 重连（小号按钮） */
+.term-status { margin: 10px 0 0; gap: 12px; }
+.term-status .spacer { flex: 1 1 auto; }
 .term-pane { display: none; }
 .term-pane.active { display: block; }
-.term-pane .term-host { margin-top: 10px; }
+.term-pane .term-host { margin-top: 8px; }
+/* 状态正常时不写提示语，空节点不该再占一行高度 */
+.term-pane .msg:empty { display: none; }
 
 /* ---------- 安全记录 ---------- */
 

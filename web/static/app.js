@@ -662,7 +662,7 @@ const VIEW_META = {
   logs: ["日志", "面板运行日志与系统日志"],
   store: ["商店", "一键安装常用服务"],
   backup: ["备份", "数据库、配置与站点打包"],
-  settings: ["设置", "访问方式、账号与运行参数"],
+  settings: ["设置", "访问方式、账号与路径配置"],
 };
 
 function icon(name, size) {
@@ -2324,8 +2324,10 @@ function renderTerminalView(root) {
       s.ws = ws;
       ws.binaryType = "arraybuffer";
       ws.onopen = () => {
-        s.msg.className = "msg ok";
-        s.msg.textContent = "已连接";
+        // 连上之后状态点已经是「已连接」，这行提示再写一遍就是重复：
+        // 清空即可（空节点靠 CSS :empty 收掉，不留空白）。
+        s.msg.className = "msg";
+        s.msg.textContent = "";
         setBadge(s, "已连接", "ok", "open");
         try { s.fit.fit(); } catch (_) { /* 忽略 */ }
         s.term.focus();
@@ -2396,10 +2398,15 @@ function renderTerminalView(root) {
     const badgeEl = el("span", { class: "badge plain", text: "未连接" });
     const dim = el("span", { class: "hint mono", text: "—" });
     const msg = el("div", { class: "msg" });
-    const clearBtn = el("button", { class: "ghost", text: "清屏" });
-    const reBtn = el("button", { class: "ghost", text: "重连" });
+    // 状态行：左「连接状态 + 尺寸」，右「清屏 / 重连」。
+    // 两个动作是辅助性的，用小号按钮——38px 的实心块放在 13px 的状态文字
+    // 旁边会把整行撑高、还会顶到标签栏底线上。
+    const clearBtn = el("button", { class: "ghost btn-sm", text: "清屏" });
+    const reBtn = el("button", { class: "ghost btn-sm", text: "重连" });
     const pane = el("div", { class: "term-pane" }, [
-      el("div", { class: "row wrap toolbar" }, [badgeEl, dim, clearBtn, reBtn]),
+      el("div", { class: "row wrap term-status" }, [
+        badgeEl, dim, el("div", { class: "spacer" }), clearBtn, reBtn,
+      ]),
       msg,
       host,
     ]);
@@ -3336,34 +3343,56 @@ function storeTable(installed, rest, supported, reload) {
   return el("table", { class: "store-table" }, [el("thead", {}, [head]), body]);
 }
 
+// 版本号里常带整段说明（xray 的 installed_version 是
+// "26.11.9 (Xray, Penetrates Everything.) 676eaf6 (go1.27.5 ...)"），
+// 表格里只留版本号本身，完整串交给 title，悬停能看全。
+function shortVersion(v) {
+  const s = String(v || "").trim();
+  if (!s) return "";
+  const m = s.match(/^[0-9][0-9A-Za-z.+~:_-]*/);
+  return m ? m[0] : s.split(/\s+/)[0];
+}
+
 function storeRow(m, supported, reload) {
-  const acts = storeActions(m, supported, reload);
+  const acts = storeActions(m, supported, reload, true);
+  const instVer = String(m.installed_version || "").trim();
+  let state;
+  if (m.installed) {
+    // 版本号可能很长（curl 的 deb 后缀、xray 的描述串），
+    // 文本包一层再给 ellipsis；直接放 badge 里因为 nowrap 只能硬裁。
+    state = badge("", "ok");
+    state.appendChild(el("span", { class: "badge-text", text: "已装 " + (shortVersion(instVer) || "✓") }));
+    if (instVer) state.title = instVer;
+  } else {
+    state = badge(riskText[m.risk] || m.risk, m.risk === "high" ? "err" : m.risk === "medium" ? "warn" : "muted");
+  }
+
   return el("tr", {}, [
     el("td", {}, [el("div", { class: "app-cell" }, [
       appLogo(m.slug),
       el("div", { class: "app-text" }, [
-        el("div", { class: "app-name", text: m.name }),
-        el("div", { class: "mono app-slug", text: m.slug + " · " + m.version }),
+        el("div", { class: "app-name", text: m.name, title: m.name }),
+        el("div", { class: "mono app-slug", text: m.slug + " · " + m.version, title: m.slug + " · " + m.version }),
       ]),
     ])]),
     el("td", { text: m.category || "-" }),
-    el("td", { class: "sub", text: m.summary }),
+    // 说明最多两行，多的截断；title 里给全文
+    el("td", { class: "sub", title: m.summary || "" }, [
+      el("div", { class: "clamp2", text: m.summary || "" }),
+    ]),
     el("td", { class: "mono", text: m.memory_mb + "MB" }),
     el("td", { class: "mono", text: m.disk_mb + "MB" }),
-    el("td", {}, [
-      m.installed
-        ? badge(m.installed_version ? "已装 " + m.installed_version : "已安装", "ok")
-        : badge(riskText[m.risk] || m.risk, m.risk === "high" ? "err" : m.risk === "medium" ? "warn" : "muted"),
-    ]),
-    el("td", {}, [el("div", { class: "row wrap" }, acts)]),
+    el("td", {}, [state]),
+    el("td", {}, [el("div", { class: "row" }, acts)]),
   ]);
 }
 
 const riskText = { low: "低风险", medium: "中风险", high: "高风险" };
 
-function storeActions(m, supported, reload) {
+function storeActions(m, supported, reload, compact) {
+  const cls = compact ? "ghost btn-sm" : "ghost";
   const acts = [
-    el("button", { class: "ghost", text: "查看步骤", onclick: async () => {
+    el("button", { class: cls, text: compact ? "步骤" : "查看步骤", title: "查看安装步骤", onclick: async () => {
       try {
         const d = await api("GET", "/api/v1/store/" + m.slug + "/plan?mode=install");
         const lines = (d.steps || []).map((s) => "• " + s).join("\n");
@@ -3376,7 +3405,7 @@ function storeActions(m, supported, reload) {
   ];
 
   if (m.installed) {
-    acts.push(el("button", { class: "ghost danger", text: "卸载", onclick: async () => {
+    acts.push(el("button", { class: compact ? "ghost danger btn-sm" : "ghost danger", text: "卸载", onclick: async () => {
       if (!confirm("卸载 " + m.name + "？会停止服务并 purge 相关软件包。")) return;
       try {
         const job = await api("POST", "/api/v1/store/" + m.slug + "/uninstall", {});
@@ -3384,7 +3413,7 @@ function storeActions(m, supported, reload) {
       } catch (e) { alert(e.message); }
     } }));
   } else if (supported) {
-    acts.push(el("button", { text: "安装", onclick: async () => {
+    acts.push(el("button", { class: compact ? "btn-sm" : "", text: "安装", onclick: async () => {
       if (m.risk === "high" && !confirm("该软件标记为高风险：" + (m.warning || "") + "\n\n仍要继续？")) return;
       else if (m.risk !== "high" && !confirm("安装 " + m.name + "？预计占用内存 " + m.memory_mb + "MB。")) return;
       try {
@@ -3624,13 +3653,13 @@ function renderSettingsView(root) {
       paintAccount(d.account || {});
       const p = d.panel || {};
       terminalChk.checked = !!p.terminal_enabled;
+      // 面板版本 / 监听地址 / 数据目录 / 数据库 这四项在概览的「面板信息」
+      // 里已经有一份，这里只列概览没有的路径类配置，避免两页重复。
       const rows = [
-        ["面板版本", p.version], ["监听地址", p.listen + (p.loopback ? "（仅本机）" : "（对外）")],
-        ["数据目录", p.data_dir], ["数据库", p.db_path],
         ["文件根目录", p.file_root], ["站点根目录", p.sites_root],
         ["Nginx 配置", p.nginx_conf], ["备份目录", p.backup_dir],
-        ["证书邮箱", p.cert_email || "未设置"], ["Web 终端", p.terminal_enabled ? "已启用" : "已关闭"],
-        ["更新仓库", p.update_repo], ["配置文件", p.config_path || "-"],
+        ["证书邮箱", p.cert_email || "未设置"], ["更新仓库", p.update_repo],
+        ["配置文件", p.config_path || "-"],
       ];
       info.replaceChildren.apply(info, rows.map(([k, v]) =>
         el("tr", {}, [el("th", { text: k }), el("td", { class: "mono", text: String(v || "-") })])));
@@ -3815,7 +3844,10 @@ function renderSettingsView(root) {
       el("div", { class: "actions" }, [save, restart]),
       msg,
     ]),
-    card("运行参数", [el("table", {}, [info])]),
+    card("路径与配置", [
+      el("div", { class: "hint", text: "面板版本、监听地址、数据目录与数据库在概览的「面板信息」里，这里只列路径类配置。" }),
+      el("table", {}, [info]),
+    ]),
     card("服务单元", [unitBox]),
     (updateCard = card("版本更新", [
       el("div", { class: "actions", style: "margin-top:0" }, [
