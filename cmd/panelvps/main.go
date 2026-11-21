@@ -2,7 +2,9 @@
 //
 // 子命令：
 //
-//	panelvps serve            启动服务（默认）
+//	panelvps                  进入管理菜单（交互式，等同 panelvps menu）
+//	panelvps menu             进入管理菜单
+//	panelvps serve            前台启动服务
 //	panelvps version          打印版本
 //	panelvps info             打印运行时路径与账号概况
 //	panelvps init             创建管理员账号
@@ -32,10 +34,19 @@ import (
 
 func main() {
 	args := os.Args[1:]
-	cmd := "serve"
+	cmd := ""
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		cmd = args[0]
 		args = args[1:]
+	}
+	if cmd == "" {
+		// 有终端就进管理菜单；被 systemd 或管道调用时仍按老行为前台启动，
+		// 避免 `panelvps < /dev/null` 这类用法突然停在那儿等输入。
+		if isTerminal(os.Stdin) {
+			cmd = "menu"
+		} else {
+			cmd = "serve"
+		}
 	}
 
 	fs := flag.NewFlagSet("panelvps "+cmd, flag.ExitOnError)
@@ -48,11 +59,14 @@ func main() {
   panelvps [命令] [参数]
 
 命令:
-  serve             启动服务（默认）
+  menu              管理菜单：启停、端口、重置密码、BBR、重启（默认）
+  serve             前台启动服务
   version           打印版本信息
   info              打印配置与账号概况
   init              创建管理员账号（已存在则跳过）
   reset-password    重置管理员密码为随机值
+
+不带命令直接运行 panelvps 会打开管理菜单；没有终端时按 serve 处理。
 
 参数:
 `, version.Version)
@@ -62,6 +76,8 @@ func main() {
 
 	var err error
 	switch cmd {
+	case "menu":
+		err = runMenu(*cfgPath, *username)
 	case "serve":
 		err = runServe(*cfgPath)
 	case "version":
