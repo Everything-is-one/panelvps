@@ -17,6 +17,8 @@ web/dist/
 
 # 运行时数据（绝不入库）
 /data/
+/conf/
+/dist/
 *.db
 *.db-wal
 *.db-shm
