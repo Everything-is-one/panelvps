@@ -228,10 +228,10 @@ function renderApp(view) {
   ]);
 
   const nav = el("div", { class: "tabs" }, [
-    navBtn("overview", "概览"), navBtn("proxy", "代理"), navBtn("sites", "网站"),
-    navBtn("files", "文件"), navBtn("terminal", "终端"), navBtn("firewall", "防火墙"),
-    navBtn("logs", "日志"), navBtn("store", "商店"), navBtn("backup", "备份"),
-    navBtn("settings", "设置"),
+    navBtn("overview", "概览"), navBtn("control", "控制"), navBtn("proxy", "代理"),
+    navBtn("sites", "网站"), navBtn("files", "文件"), navBtn("terminal", "终端"),
+    navBtn("firewall", "防火墙"), navBtn("logs", "日志"), navBtn("store", "商店"),
+    navBtn("backup", "备份"), navBtn("settings", "设置"),
   ]);
   const content = el("div", { id: "view" });
 
@@ -239,6 +239,7 @@ function renderApp(view) {
   app().replaceChildren(head, nav, content);
 
   switch (state.view) {
+    case "control": renderControlView(content); break;
     case "proxy": renderProxyView(content); break;
     case "sites": renderSitesView(content); break;
     case "files": renderFilesView(content); break;
@@ -1628,6 +1629,251 @@ function renderSettingsView(root) {
     ]),
   );
   load();
+}
+
+// ---------- 控制 ----------
+
+function renderControlView(root) {
+  const msg = el("div", { class: "msg" });
+  const accessBox = el("div");
+  const accountBox = el("div");
+  const bbrBox = el("div");
+  const serviceBox = el("div");
+  const sysBody = el("tbody");
+  const portInput = el("input", { type: "number", min: "1", max: "65535", style: "max-width:130px" });
+  const publicChk = el("input", { type: "checkbox" });
+
+  const show = (text, kind) => {
+    msg.className = "msg" + (kind ? " " + kind : "");
+    msg.textContent = text;
+  };
+
+  const setBBR = async (enabled) => {
+    if (!confirm(enabled ? "开启 BBR？会写入 sysctl 配置并立即生效。" : "关闭 BBR，切回 cubic？")) return;
+    show("正在应用…");
+    try {
+      const r = await api("POST", "/api/v1/control/bbr", { enabled, confirm: "BBR" });
+      paintBBR(r.bbr || {});
+      show(enabled ? "BBR 已开启" : "BBR 已关闭", "ok");
+    } catch (e) {
+      show(e.message, "err");
+    }
+  };
+
+  const setAccess = async () => {
+    const port = parseInt(portInput.value, 10);
+    if (!port || port < 1 || port > 65535) { show("端口应在 1–65535 之间", "err"); return; }
+    const pub = publicChk.checked;
+    const tip = "面板会重启，当前页面断开约 3 秒。" + (pub ? "" : "\n改为仅本机后，只能通过 SSH 隧道访问。");
+    if (!confirm(tip)) return;
+    show("保存中…");
+    try {
+      const r = await api("PUT", "/api/v1/control/access", { port, public: pub, confirm: "ACCESS" });
+      const extra = (r.warnings || []).length ? " " + r.warnings.join("；") : "";
+      show("已保存" + (r.restarting ? "，面板重启中…" : "") + extra, "ok");
+      if (!r.restarting) return;
+      const h = location.hostname;
+      if (r.public && location.protocol === "http:" && h !== "127.0.0.1" && h !== "localhost" && h !== "::1") {
+        setTimeout(() => { location.href = location.protocol + "//" + h + ":" + r.port + "/"; }, 4500);
+      } else if (!r.public) {
+        show("已保存，服务重启后请通过 SSH 隧道访问 127.0.0.1:" + r.port, "ok");
+      } else {
+        show("已保存，服务重启后请用上面列出的地址访问。", "ok");
+      }
+    } catch (e) {
+      show(e.message, "err");
+    }
+  };
+
+  const showPasswordModal = (pwd) => {
+    const input = el("input", { readonly: true, class: "mono" });
+    input.value = pwd;
+    const m = modal("新密码（只显示一次）", [
+      el("div", { class: "hint", text: "请立即保存。关闭后无法再次查看，只能重新重置。" }),
+      input,
+      el("div", { class: "row wrap", style: "margin-top:12px" }, [
+        el("button", { text: "复制", onclick: async () => {
+          try { await navigator.clipboard.writeText(pwd); }
+          catch (_) { input.select(); document.execCommand("copy"); }
+        } }),
+        el("button", { class: "ghost", text: "我已保存，去登录", onclick: () => m.close() }),
+      ]),
+    ], () => {
+      state.user = null;
+      renderLogin("密码已重置，请用新密码登录");
+    });
+  };
+
+  const resetRandom = async () => {
+    if (!confirm("生成新的随机密码，并踢掉所有已登录会话？")) return;
+    try {
+      const r = await api("POST", "/api/v1/control/password", { mode: "random", confirm: "RESET" });
+      showPasswordModal(r.password);
+    } catch (e) {
+      show(e.message, "err");
+    }
+  };
+
+  const restartPanel = async () => {
+    if (!confirm("重启 panelvps 服务？面板会断开约 3 秒，网站和代理不受影响。")) return;
+    try {
+      await api("POST", "/api/v1/system/restart", { confirm: "RESTART" });
+      show("正在重启，5 秒后自动刷新…", "ok");
+      setTimeout(() => location.reload(), 5000);
+    } catch (e) {
+      show(e.message, "err");
+    }
+  };
+
+  const restartXray = async () => {
+    if (!confirm("重启 Xray？现有代理连接会短暂中断。")) return;
+    try {
+      await api("POST", "/api/v1/control/xray/restart", {});
+      show("Xray 已重启", "ok");
+    } catch (e) {
+      show(e.message, "err");
+    }
+  };
+
+  const rebootServer = async () => {
+    const word = prompt("将重启整台服务器，所有服务都会中断。\n输入 REBOOT 继续：");
+    if (word !== "REBOOT") return;
+    try {
+      await api("POST", "/api/v1/control/reboot", { confirm: "REBOOT" });
+      show("服务器正在重启，连接会中断。", "ok");
+    } catch (e) {
+      show(e.message, "err");
+    }
+  };
+
+  const paintAccess = (d) => {
+    portInput.value = String(d.panel.port || "");
+    publicChk.checked = !!d.panel.public;
+    const urls = d.panel.urls || [];
+    const kids = [
+      el("div", { class: "row wrap" }, [
+        badge(d.panel.public ? "外网可访问" : "仅本机", d.panel.public ? "warn" : "ok"),
+        el("span", { class: "mono", text: d.panel.listen || "-" }),
+      ]),
+    ];
+    urls.forEach((u) => kids.push(el("div", { style: "margin-top:6px" }, [
+      el("a", { class: "mono", href: u, target: "_blank", rel: "noreferrer", text: u }),
+    ])));
+    if (!urls.length && d.panel.public) {
+      kids.push(el("div", { class: "hint", text: "没有探测到可用地址，请用服务器公网 IP:" + d.panel.port }));
+    }
+    if ((d.panel.local_ips || []).length) {
+      kids.push(el("div", { class: "hint", text: "本机网卡地址：" + d.panel.local_ips.join("、") }));
+    }
+    kids.push(d.panel.public
+      ? el("div", { class: "banner", style: "margin-top:12px", text: "面板已对外开放，而且只提供 HTTP。请使用强密码，并确认云厂商安全组放行了 " + d.panel.port + "/tcp。" })
+      : el("div", { class: "hint", text: "只监听 127.0.0.1，需要通过 SSH 隧道访问。" }));
+    accessBox.replaceChildren.apply(accessBox, kids);
+  };
+
+  const paintAccount = (d) => {
+    const a = d.account || {};
+    accountBox.replaceChildren(
+      el("div", { class: "row wrap" }, [
+        badge(a.username || "admin", "plain"),
+        el("span", { class: "hint", text: a.last_login_at
+          ? "上次登录 " + fmtTime(a.last_login_at) + (a.last_login_ip ? " · " + a.last_login_ip : "")
+          : "还没有登录记录" }),
+      ]),
+      el("div", { class: "row wrap", style: "margin-top:12px" }, [
+        el("button", { text: "重置为随机密码", onclick: resetRandom }),
+        el("button", { class: "ghost", text: "修改密码（需旧密码）", onclick: () => renderChangePassword(false) }),
+      ]),
+      el("div", { class: "hint", text: "重置会立即踢掉所有会话，新密码只显示一次。" }),
+    );
+  };
+
+  const paintBBR = (b) => {
+    bbrBox.replaceChildren(
+      el("div", { class: "row wrap" }, [
+        badge(b.enabled ? "已开启" : "未开启", b.enabled ? "ok" : "plain"),
+        badge("拥塞控制 " + (b.current || "-"), "muted"),
+        badge("队列 " + (b.qdisc || "-"), "muted"),
+        b.supported ? null : badge("不可用", "err"),
+      ]),
+      el("div", { class: "hint", text: b.reason || ("可用算法：" + ((b.available || []).join(" ") || "-")) }),
+      el("div", { class: "row wrap", style: "margin-top:10px" }, [
+        el("button", { text: b.enabled ? "重新应用 BBR" : "开启 BBR", disabled: !b.supported, onclick: () => setBBR(true) }),
+        el("button", { class: "ghost", text: "关闭 BBR", disabled: !b.enabled, onclick: () => setBBR(false) }),
+      ]),
+      el("div", { class: "hint", text: "写入 /etc/sysctl.d/99-panelvps.conf，由 panelvps-sysctl.service 立即应用，重启后仍然有效。" }),
+    );
+  };
+
+  const paintServices = (d) => {
+    const kids = [el("button", { text: "重启面板", onclick: restartPanel })];
+    if (d.xray && d.xray.available) {
+      kids.push(el("button", { class: "ghost", text: d.xray.running ? "重启 Xray" : "启动 Xray", onclick: restartXray }));
+    }
+    kids.push(el("button", { class: "ghost danger", text: "重启服务器", onclick: rebootServer }));
+    serviceBox.replaceChildren(
+      el("div", { class: "row wrap" }, kids),
+      el("div", { class: "hint", text: "重启面板只影响管理界面；重启服务器会中断所有站点与代理。" }),
+    );
+  };
+
+  const load = async () => {
+    try {
+      const d = await api("GET", "/api/v1/control");
+      paintAccess(d);
+      paintAccount(d);
+      paintBBR(d.bbr || {});
+      paintServices(d);
+      const rows = [
+        ["主机名", d.system.hostname],
+        ["系统", d.system.distro],
+        ["内核", d.system.kernel],
+        ["架构", d.system.arch],
+        ["时区", d.system.timezone],
+        ["运行时长", uptimeText(d.system.uptime)],
+        ["面板版本", d.panel.version],
+        ["配置文件", d.panel.config_path],
+        ["防火墙", d.firewall.supported ? d.firewall.backend : (d.firewall.reason || "不可用")],
+      ];
+      sysBody.replaceChildren.apply(sysBody, rows.map(([k, v]) =>
+        el("tr", {}, [el("th", { text: k }), el("td", { class: "mono", text: String(v || "-") })])));
+    } catch (e) {
+      if (e.status === 401) { renderLogin("会话已失效，请重新登录"); return; }
+      show(e.message, "err");
+    }
+  };
+
+  root.replaceChildren(
+    msg,
+    card("访问方式", [
+      accessBox,
+      el("label", { class: "row", style: "margin-top:12px" }, [
+        publicChk, el("span", { text: "允许通过 IP + 端口访问" }),
+      ]),
+      el("label", { class: "row", style: "margin-top:8px" }, [
+        el("span", { text: "端口" }), portInput,
+        el("span", { class: "hint", text: "1–65535，保存后面板自动重启" }),
+      ]),
+      el("div", { class: "row wrap", style: "margin-top:6px" }, [
+        el("button", { text: "保存并重启面板", onclick: setAccess }),
+      ]),
+    ]),
+    card("账号", [accountBox]),
+    card("BBR 加速", [bbrBox]),
+    card("服务", [serviceBox]),
+    card("系统信息", [el("table", {}, [sysBody])]),
+  );
+  load();
+}
+
+function uptimeText(sec) {
+  sec = parseInt(sec, 10) || 0;
+  const days = Math.floor(sec / 86400);
+  const hours = Math.floor((sec % 86400) / 3600);
+  const mins = Math.floor((sec % 3600) / 60);
+  if (days > 0) return days + " 天 " + hours + " 小时";
+  if (hours > 0) return hours + " 小时 " + mins + " 分";
+  return mins + " 分";
 }
 
 // ---------- 任务进度 ----------

@@ -70,6 +70,9 @@ type Server struct {
 
 	updMu   sync.Mutex
 	updInfo *updateInfo
+
+	restartMu  sync.Mutex
+	restarting bool
 }
 
 // New 构造 Server 并注册路由。
@@ -174,6 +177,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/system/jobs", s.requireAuth(s.handleJobs))
 	s.mux.HandleFunc("GET /api/v1/system/jobs/{id}", s.requireAuth(s.handleJob))
 	s.mux.HandleFunc("GET /api/v1/audit", s.requireAuth(s.handleAuditList))
+
+	// 控制台：访问方式、账号、BBR、重启
+	s.mux.HandleFunc("GET /api/v1/control", s.requireAuth(s.handleControlStatus))
+	s.mux.HandleFunc("PUT /api/v1/control/access", s.requireAuth(s.handleControlAccess))
+	s.mux.HandleFunc("POST /api/v1/control/password", s.requireAuth(s.handleControlPassword))
+	s.mux.HandleFunc("POST /api/v1/control/reboot", s.requireAuth(s.handleControlReboot))
+	s.mux.HandleFunc("POST /api/v1/control/bbr", s.requireAuth(s.handleControlBBR))
+	s.mux.HandleFunc("POST /api/v1/control/xray/restart", s.requireAuth(s.handleControlXrayRestart))
 
 	// 文件
 	s.mux.HandleFunc("GET /api/v1/files", s.requireAuth(s.handleFileList))

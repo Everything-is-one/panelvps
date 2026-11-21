@@ -97,12 +97,7 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "panel_restart", "panel", "用户触发重启")
 	ok(w, map[string]any{"restarting": true})
-	go func() {
-		time.Sleep(1200 * time.Millisecond)
-		if err := exec.Command("systemctl", "restart", "panelvps").Run(); err != nil {
-			s.logger.Error("自重启失败", "err", err)
-		}
-	}()
+	s.restartPanelSoon(1200 * time.Millisecond)
 }
 
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {

@@ -47,7 +47,10 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 		h.Set("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
 		h.Set("Content-Security-Policy",
 			"default-src 'self'; base-uri 'none'; form-action 'self'; "+
-				"frame-ancestors 'none'; object-src 'none'; connect-src 'self'")
+				"frame-ancestors 'none'; object-src 'none'; connect-src 'self'; "+
+				// 前端是零构建的原生 JS，进度条宽度、弹窗间距等直接用 style 属性；
+				// 页面文本全部走 textContent，不存在把用户输入当 HTML 解析的路径。
+				"style-src 'self' 'unsafe-inline'")
 		// HSTS 只在确实走 TLS 时下发，避免本地 http 调试被浏览器锁死
 		if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
 			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")

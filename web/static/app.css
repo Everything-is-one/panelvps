@@ -101,6 +101,8 @@ tr:last-child td { border-bottom: 0; }
 .row.wrap { flex-wrap: wrap; }
 .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12px; }
 .muted { color: var(--muted); }
+.hint { font-size: 12px; color: var(--muted); }
+.row > label.row { flex: 0 0 auto; white-space: nowrap; }
 .right { text-align: right; }
 
 /* 顶部标签页 */
@@ -121,6 +123,7 @@ tr:last-child td { border-bottom: 0; }
 }
 .badge.ok { background: #e6f4ef; color: var(--ok); }
 .badge.warn { background: #fdf1de; color: #8a5a12; }
+.badge.err { background: #fbeaea; color: var(--danger); }
 .badge.plain { background: #f1f1ee; color: var(--muted); }
 
 .card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
