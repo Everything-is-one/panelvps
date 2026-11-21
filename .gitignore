@@ -1,0 +1,48 @@
+# Go
+/bin/
+/dist/
+*.exe
+*.exe~
+*.test
+*.out
+vendor/
+go.work.sum
+coverage.*
+
+# 前端
+node_modules/
+web/dist/
+.pnpm-store/
+*.tsbuildinfo
+
+# 运行时数据（绝不入库）
+/data/
+*.db
+*.db-wal
+*.db-shm
+backups/
+conf/panel.yaml
+
+# 密钥与证书
+*.pem
+*.key
+*.crt
+*.p12
+.env
+.env.*
+
+# 编辑器 / 系统
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# WorkBuddy 项目数据
+.workbuddy/
+
+# 临时
+*.tmp
+*.bak
+*.log
