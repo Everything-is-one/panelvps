@@ -102,7 +102,14 @@ fetch() {
         return 0
     fi
     url="https://raw.githubusercontent.com/$REPO/$REF/$rel"
-    curl -fsSL --connect-timeout 10 --retry 3 --retry-delay 2 "$url" -o "$out" || return 1
+    if curl -fsSL --connect-timeout 10 --retry 3 --retry-delay 2 "$url" -o "$out"; then
+        return 0
+    fi
+    # raw 会偶发 TLS 握手失败，退回 contents API 取同一份内容
+    warn "raw 拉取失败（$rel），改走 API"
+    curl -fsSL --connect-timeout 10 --retry 2 \
+        -H "Accept: application/vnd.github.raw" \
+        "https://api.github.com/repos/$REPO/contents/$rel?ref=$REF" -o "$out"
 }
 
 # Release 资产的直链：指定 tag 时锁定该版本，否则跟随 latest
