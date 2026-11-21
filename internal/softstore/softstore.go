@@ -61,7 +61,10 @@ type Manifest struct {
 	Conflicts []string `yaml:"conflicts" json:"conflicts"`
 	Risk      string   `yaml:"risk" json:"risk"` // low | medium | high
 	Warning   string   `yaml:"warning" json:"warning"`
-	Plan      Plan     `yaml:"plan" json:"-"`
+	// Detect 是一条探测命令（如 xray version）。apt 装的软件靠 dpkg 判断，
+	// 直接下载二进制的软件没有包记录，只能靠命令能否跑起来判断已装。
+	Detect []string `yaml:"detect" json:"detect,omitempty"`
+	Plan   Plan     `yaml:"plan" json:"-"`
 }
 
 // Plan 是安装与卸载的声明式步骤。
@@ -96,10 +99,11 @@ type DownloadAction struct {
 	Mode   string `yaml:"mode" json:"mode"`
 }
 
-// ExtractAction 解压到目标目录。
+// ExtractAction 解压到目标目录。Include 非空时只解压这些文件名（按 basename 匹配）。
 type ExtractAction struct {
-	Src  string `yaml:"src" json:"src"`
-	Dest string `yaml:"dest" json:"dest"`
+	Src     string   `yaml:"src" json:"src"`
+	Dest    string   `yaml:"dest" json:"dest"`
+	Include []string `yaml:"include" json:"include,omitempty"`
 }
 
 // WriteFileAction 从内嵌模板写文件。
@@ -122,6 +126,9 @@ type ServiceAction struct {
 	Disable bool   `yaml:"disable" json:"disable"`
 	Start   bool   `yaml:"start" json:"start"`
 	Stop    bool   `yaml:"stop" json:"stop"`
+	// IgnoreError 用于「单元可能不存在」的场景：停用随包安装的服务时，
+	// 没装过官方包的机器上 systemctl 会报未找到，不该让整个安装回滚。
+	IgnoreError bool `yaml:"ignore_error" json:"ignore_error"`
 }
 
 // CheckAction 执行一条校验命令。
@@ -219,7 +226,7 @@ func (a Action) validate() error {
 		if err := checkPublicHost(u.Hostname()); err != nil {
 			return err
 		}
-		if !filepath.IsAbs(a.Download.Dest) {
+		if !path.IsAbs(a.Download.Dest) {
 			return errors.New("download.dest 必须是绝对路径")
 		}
 		if a.Download.SHA256 != "" && len(a.Download.SHA256) != 64 {
@@ -228,13 +235,13 @@ func (a Action) validate() error {
 	}
 	if a.Extract != nil {
 		n++
-		if !filepath.IsAbs(a.Extract.Src) || !filepath.IsAbs(a.Extract.Dest) {
+		if !path.IsAbs(a.Extract.Src) || !path.IsAbs(a.Extract.Dest) {
 			return errors.New("extract 的 src/dest 必须是绝对路径")
 		}
 	}
 	if a.WriteFile != nil {
 		n++
-		if !filepath.IsAbs(a.WriteFile.Path) {
+		if !path.IsAbs(a.WriteFile.Path) {
 			return errors.New("write_file.path 必须是绝对路径")
 		}
 		if a.WriteFile.From == "" || strings.Contains(a.WriteFile.From, "..") {
@@ -243,7 +250,7 @@ func (a Action) validate() error {
 	}
 	if a.Path != nil {
 		n++
-		if !filepath.IsAbs(a.Path.Path) {
+		if !path.IsAbs(a.Path.Path) {
 			return errors.New("path.path 必须是绝对路径")
 		}
 		if a.Path.State != "directory" && a.Path.State != "absent" {
@@ -510,7 +517,9 @@ func runDownload(ctx context.Context, a DownloadAction, log func(string)) error 
 	if err := os.MkdirAll(filepath.Dir(a.Dest), 0o755); err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.URL, nil)
+	// 清单里用 ${ARCH} 表示架构，下载前再展开，这样一份清单同时覆盖 amd64 / arm64
+	url := strings.ReplaceAll(a.URL, "${ARCH}", archTag())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
@@ -571,12 +580,41 @@ func runExtract(a ExtractAction, log func(string)) error {
 	lower := strings.ToLower(a.Src)
 	switch {
 	case strings.HasSuffix(lower, ".zip"):
-		return extractZip(a.Src, a.Dest, log)
+		return extractZip(a.Src, a.Dest, a.Include, log)
 	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
-		return extractTarGz(a.Src, a.Dest, log)
+		return extractTarGz(a.Src, a.Dest, a.Include, log)
 	default:
 		return errors.New("仅支持 .zip / .tar.gz")
 	}
+}
+
+// archTag 返回上游发布件常用的架构命名。
+func archTag() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "64"
+	case "arm64":
+		return "arm64-v8a"
+	case "386":
+		return "32"
+	case "arm":
+		return "arm32-v7a"
+	}
+	return runtime.GOARCH
+}
+
+// wantFile 判断某个归档条目是否需要解压。include 为空表示全要。
+func wantFile(name string, include []string) bool {
+	if len(include) == 0 {
+		return true
+	}
+	base := filepath.Base(name)
+	for _, want := range include {
+		if base == want {
+			return true
+		}
+	}
+	return false
 }
 
 func safeJoin(root, name string) (string, error) {
@@ -592,14 +630,18 @@ func safeJoin(root, name string) (string, error) {
 	return abs, nil
 }
 
-func extractZip(src, dst string, log func(string)) error {
+func extractZip(src, dst string, include []string, log func(string)) error {
 	zr, err := zip.OpenReader(src)
 	if err != nil {
 		return err
 	}
 	defer zr.Close()
+	kept := 0
 	for _, f := range zr.File {
 		if f.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		if !f.FileInfo().IsDir() && !wantFile(f.Name, include) {
 			continue
 		}
 		target, err := safeJoin(dst, f.Name)
@@ -612,6 +654,7 @@ func extractZip(src, dst string, log func(string)) error {
 			}
 			continue
 		}
+		kept++
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
@@ -631,11 +674,11 @@ func extractZip(src, dst string, log func(string)) error {
 			return err
 		}
 	}
-	log(fmt.Sprintf("  解压 %d 个条目", len(zr.File)))
+	log(fmt.Sprintf("  解压 %d 个条目", kept))
 	return nil
 }
 
-func extractTarGz(src, dst string, log func(string)) error {
+func extractTarGz(src, dst string, include []string, log func(string)) error {
 	f, err := os.Open(src)
 	if err != nil {
 		return err
@@ -660,6 +703,9 @@ func extractTarGz(src, dst string, log func(string)) error {
 		count++
 		if count > 50000 {
 			return errors.New("压缩包条目过多")
+		}
+		if hdr.Typeflag == tar.TypeReg && !wantFile(hdr.Name, include) {
+			continue
 		}
 		target, err := safeJoin(dst, hdr.Name)
 		if err != nil {
@@ -740,6 +786,10 @@ func runService(a ServiceAction, log func(string)) error {
 			continue
 		}
 		if err := runCmd(context.Background(), log, "systemctl", s.verb, a.Name); err != nil {
+			if a.IgnoreError {
+				log("  跳过 systemctl " + s.verb + " " + a.Name)
+				continue
+			}
 			return fmt.Errorf("systemctl %s %s 失败: %w", s.verb, a.Name, err)
 		}
 		if s.verb == "start" || s.verb == "stop" {
@@ -759,8 +809,18 @@ func runCheck(ctx context.Context, a CheckAction, log func(string)) error {
 	return nil
 }
 
-// Installed 判断清单里的 apt 包是否已安装，返回版本号。
+// Installed 判断清单里的软件是否已安装，返回版本号。
 func Installed(m *Manifest) (string, bool) {
+	if len(m.Detect) > 0 && runtime.GOOS == "linux" {
+		out, err := exec.Command(m.Detect[0], m.Detect[1:]...).Output()
+		if err == nil {
+			v := strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
+			if len(v) > 60 {
+				v = v[:60] + "…"
+			}
+			return v, true
+		}
+	}
 	for _, a := range m.Plan.Install {
 		if a.Apt == nil {
 			continue

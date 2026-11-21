@@ -52,12 +52,27 @@ func catalog(dataDir string) []struct {
 	file string
 	unit []string
 } {
+	// 面板自己写的日志文件优先：服务单元有 ProtectSystem 沙箱，部分容器里
+	// 从沙箱内部执行 journalctl -u panelvps 只会得到 "-- No entries --"，
+	// 用户看到的就是一个空白的日志页。
+	panelSrc := Source{Key: "panel", Label: "面板服务", Kind: "journal", Detail: "journalctl -u panelvps"}
+	var panelFile string
+	var panelUnit = []string{"panelvps"}
+	if logPath := filepath.Join(dataDir, "panel.log"); dataDir != "" {
+		if st, err := os.Stat(logPath); err == nil && !st.IsDir() {
+			panelSrc.Kind = "file"
+			panelSrc.Detail = logPath
+			panelFile = logPath
+			panelUnit = nil
+		}
+	}
+
 	return []struct {
 		src  Source
 		file string
 		unit []string
 	}{
-		{Source{Key: "panel", Label: "面板服务", Kind: "journal", Detail: "journalctl -u panelvps"}, "", []string{"panelvps"}},
+		{panelSrc, panelFile, panelUnit},
 		{Source{Key: "xray", Label: "Xray 内核", Kind: "journal", Detail: "journalctl -u xray"}, "", []string{"xray"}},
 		{Source{Key: "auth", Label: "SSH 登录", Kind: "journal", Detail: "journalctl -u ssh"}, "", []string{"ssh", "sshd"}},
 		{Source{Key: "nginx-access", Label: "Nginx 访问", Kind: "file", Detail: "/var/log/nginx/access.log"},

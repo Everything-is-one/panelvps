@@ -1,0 +1,35 @@
+slug: xray
+name: Xray
+category: proxy
+summary: 代理内核。面板「代理」页的 VLESS / VMess / Trojan / Shadowsocks 入站都跑在它上面
+version: latest
+memory_mb: 40
+disk_mb: 30
+ports: []
+deps: []
+conflicts: []
+risk: medium
+warning: 面板自己 spawn xray 进程，这里会顺手停用随官方包安装的 xray.service，避免两个实例抢同一个端口。
+detect: ["/usr/local/bin/xray", "version"]
+plan:
+  install:
+    - download:
+        url: https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${ARCH}.zip
+        dest: /tmp/panelvps-xray.zip
+        mode: "0644"
+    - extract:
+        src: /tmp/panelvps-xray.zip
+        dest: /usr/local/bin
+        include: [xray]
+    - path: { path: /usr/local/share/xray, state: directory }
+    - extract:
+        src: /tmp/panelvps-xray.zip
+        dest: /usr/local/share/xray
+        include: [geoip.dat, geosite.dat]
+    - check: { cmd: ["/usr/local/bin/xray", "version"] }
+    - service: { name: xray, stop: true, disable: true, ignore_error: true }
+    - path: { path: /tmp/panelvps-xray.zip, state: absent }
+  uninstall:
+    - service: { name: xray, stop: true, disable: true, ignore_error: true }
+    - path: { path: /usr/local/bin/xray, state: absent }
+    - path: { path: /usr/local/share/xray, state: absent }

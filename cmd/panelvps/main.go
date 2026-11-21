@@ -16,10 +16,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"syscall"
@@ -108,7 +110,7 @@ func defaultConfigPath() string {
 	return "./conf/panel.yaml"
 }
 
-func newLogger(level string) *slog.Logger {
+func newLogger(level, dataDir string) *slog.Logger {
 	var lv slog.Level
 	switch strings.ToLower(level) {
 	case "debug":
@@ -120,8 +122,14 @@ func newLogger(level string) *slog.Logger {
 	default:
 		lv = slog.LevelInfo
 	}
-	// 日志走 stdout，交给 journald 收集（PRD 附录 ADR-08）
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lv}))
+	// 主通道仍是 stdout，交给 journald 收集（PRD 附录 ADR-08）。
+	// 同时写一份 <data_dir>/panel.log：容器里服务沙箱常读不到自己的
+	// journal 单元，日志页需要一份不依赖 journald 的副本。
+	out := io.Writer(os.Stdout)
+	if lw, err := newRotatingWriter(filepath.Join(dataDir, "panel.log"), 5<<20); err == nil {
+		out = io.MultiWriter(os.Stdout, lw)
+	}
+	return slog.New(slog.NewJSONHandler(out, &slog.HandlerOptions{Level: lv}))
 }
 
 // tuneMemory 把 Go 的内存上限压到 64MiB。
@@ -141,7 +149,7 @@ func runServe(cfgPath string) error {
 		// 带上路径：systemd 下日志只剩这一行，没有路径很难判断是哪个文件
 		return fmt.Errorf("读取配置 %s 失败: %w", cfgPath, err)
 	}
-	logger := newLogger(cfg.LogLevel)
+	logger := newLogger(cfg.LogLevel, cfg.DataDir)
 
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
