@@ -25,6 +25,7 @@ PanelVPS 把 VPS 上常做的几件事放进一个网页：看资源、改文件
 | M2 | 运维：监控、文件、终端、防火墙、日志 | ✅ 已完成 |
 | M3 | 网站与商店：站点/证书/PHP、声明式软件商店 | ✅ 已完成 |
 | M4 | 打磨：备份、告警、自更新、签名发布 | ✅ 已完成（签名发布未做） |
+| M5 | 控制：公网访问与端口、重置密码、BBR、重启 | ✅ 已完成 |
 
 ## 资源与范围
 
@@ -37,6 +38,7 @@ PanelVPS 把 VPS 上常做的几件事放进一个网页：看资源、改文件
 | 页面 | 能做什么 |
 |---|---|
 | 概览 | CPU / 内存 / 磁盘 / 面板占用，地址、数据库、审计条数、运行时长 |
+| 控制 | 访问方式与端口、重置密码、BBR 开关、重启面板 / Xray / 服务器、系统信息 |
 | 代理 | 入站与用户管理、分享链接与二维码、流量采样、配额与到期 |
 | 网站 | 建站（静态 / PHP）、生成并下发 Nginx 配置、申请证书、预览配置 |
 | 文件 | 浏览、编辑、上传下载、打包解压、重命名/复制/删除（沙箱限定根目录） |
@@ -93,8 +95,8 @@ curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/main/dep
 生产环境建议锁定版本，让脚本和二进制取同一个 tag，避免 `main` 更新后错配：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.1.1/deploy/bootstrap.sh \
-    | sudo bash -s -- --ref v0.1.1
+curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.2.0/deploy/bootstrap.sh \
+    | sudo bash -s -- --ref v0.2.0
 ```
 
 只体检、不安装（逐项报告能力，不改动系统）：
@@ -102,6 +104,21 @@ curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.1.1/d
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/main/deploy/bootstrap.sh \
     | sudo bash -s -- --check
+```
+
+`bootstrap.sh` 的常用参数（透传给 `install.sh`）：
+
+| 参数 | 作用 |
+|---|---|
+| `--ref TAG` | 锁定版本，脚本与二进制取同一个 tag |
+| `--base URL` | 换分发源，见下表 |
+| `--public` | 装完直接监听 `0.0.0.0`，可用 `IP:端口` 访问 |
+| `--check` | 只体检，不安装 |
+
+卸载走 `deploy/` 目录里的安装脚本，数据目录会保留：
+
+```bash
+sudo ./deploy/install.sh --uninstall
 ```
 
 `bootstrap.sh` 取文件的来源按优先级：
@@ -136,8 +153,22 @@ ssh -L 20873:127.0.0.1:20873 root@<服务器IP>
 # 浏览器打开 http://127.0.0.1:20873
 ```
 
-确实需要公网直连时，改 `/opt/panelvps/conf/panel.yaml` 的 `listen`，
-但请同时配好防火墙和 TLS 反向代理。面板自己不做 HTTPS，管理后台裸奔等于把 root 交出去。
+想直接用 `IP:端口` 打开，安装时加 `--public`：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/main/deploy/bootstrap.sh \
+    | sudo bash -s -- --public
+```
+
+装完会打印访问地址，并提醒去云厂商安全组放行该端口。已经装好的也不用重装：
+登录后进「控制 → 访问方式」，勾上「允许从公网访问」并保存，面板会改监听地址、同步防火墙规则、
+然后自己重启，用新地址就能打开。
+
+同一个地方还能改端口（1–65535）。保存顺序是先试绑新端口 → 更新防火墙 → 重启面板，
+任何一步失败都回滚，不会出现「新端口没放行、旧端口已关」把自己锁在门外。
+
+> 面板自己不做 HTTPS，公网直连就是明文 HTTP。要么在前面套一层 TLS 反向代理，
+> 要么至少用 16 位以上随机密码，并且只放行自己的出口 IP。
 
 ### 在 LXC / 容器里安装
 
@@ -178,8 +209,8 @@ sudo journalctl -u panelvps | grep 初始管理员     # 取初始密码
   `sysctl -w net.ipv4.ip_unprivileged_port_start=0` 验证是否允许。
 - **防火墙不可下发**：安全边界退化为「只监听 127.0.0.1 + SSH 隧道」。
   在容器里刷 iptables 会和宿主规则打架，商家一般也不允许，不建议强求。
-- **想在 NAT 小鸡上直连面板**：把 `conf/panel.yaml` 的 `listen` 改成 `0.0.0.0:20873`，
-  再用商家给的端口映射访问；只做临时测试，测完改回 `127.0.0.1`。
+- **想在 NAT 小鸡上直连面板**：进「控制 → 访问方式」勾上公网访问，或把 `conf/panel.yaml`
+  的 `listen` 改成 `0.0.0.0:20873`，再用商家给的端口映射访问；只做临时测试，测完改回 `127.0.0.1`。
 
 **只想先跑起来看看**（不装 systemd 服务）：
 
@@ -298,6 +329,42 @@ Windows 上无法创建 PTY。有 FAIL 时脚本以退出码 1 结束，可用�
 - 商店：11 个清单可读，步骤可预览，非 Linux 安装/卸载 501
 - 备份：任务是异步的、产物是合法 tar.gz 且含 `panel.db`、`../` 名称 400、恢复需确认词
 - 更新：非 GitHub 来源 400
+
+## 控制页与内核调优
+
+「控制」页把装完之后才需要的操作集中起来，省得为了改个端口去翻配置文件。
+
+| 能力 | 说明 |
+|---|---|
+| 访问方式 | 默认只监听 `127.0.0.1`；切到公网后页面列出所有可用地址，标出是否只有 HTTP |
+| 改端口 | 先 `net.Listen` 试绑 → 改配置 → 按新端口重新下发防火墙 → 重启；防火墙失败则回滚配置并报错 |
+| 重置密码 | 随机（20 位，只显示一次）或自定义；走同一套密码策略，改完删掉该账号的全部会话 |
+| 重启 | 面板 / Xray / 整机三档；整机重启要输入 `REBOOT` 确认，用 `systemctl --no-block` 不卡住请求 |
+| BBR | 读写 `/etc/sysctl.d/99-panelvps.conf`；先探测内核有没有 `tcp_bbr`，没有就置灰并说明原因 |
+
+BBR 这一项没有为了它放宽主服务的沙箱。主单元带 `ProtectKernelTunables=yes`，进程本身写不了 `/proc/sys`，
+与其为了一个开关拆掉加固，不如让一个独立的 oneshot 单元去干这件事：
+
+```ini
+# /etc/systemd/system/panelvps-sysctl.service
+ExecStartPre=-/sbin/modprobe tcp_bbr
+ExecStart=/sbin/sysctl -p /etc/sysctl.d/99-panelvps.conf
+```
+
+面板只负责写文件，再 `systemctl restart panelvps-sysctl` 让配置立即生效，不用 reboot。
+配置文件首行带 `# Managed by PanelVPS`，不是本面板生成的文件（比如你自己手写的 tuning）会拒绝覆盖，
+避免把别人的内核参数一起冲掉。
+
+控制接口：
+
+```
+GET    /api/v1/control                  面板 / 账号 / BBR / Xray / 防火墙 / 系统信息
+PUT    /api/v1/control/access           改监听地址与端口（confirm=ACCESS）
+POST   /api/v1/control/password         重置密码（confirm=RESET，mode=random|custom）
+POST   /api/v1/control/bbr              开 / 关 BBR（confirm=BBR）
+POST   /api/v1/control/xray/restart     重启 Xray
+POST   /api/v1/control/reboot           重启服务器（confirm=REBOOT）
+```
 
 ## 代理接口
 
