@@ -48,3 +48,7 @@ desktop.ini
 *.tmp
 *.bak
 *.log
+
+# Python 缓存
+__pycache__/
+*.pyc

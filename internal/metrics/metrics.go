@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Snapshot 是一次采样结果。所有容量单位为字节。
@@ -29,6 +30,9 @@ type Snapshot struct {
 	Supported  bool    `json:"supported"`
 	PanelRSS   uint64  `json:"panel_rss"`
 	Goroutines int     `json:"goroutines"`
+	// Container 表示内存与 CPU 数据来自 cgroup 限额而非宿主机 /proc。
+	// LXC 默认不挂 lxcfs 时，/proc 报的是宿主机数据，必须用 cgroup 纠正。
+	Container bool `json:"container"`
 }
 
 // Collector 维护上一次的 CPU 计数，用于计算占用率。
@@ -37,6 +41,11 @@ type Collector struct {
 	lastIdle uint64
 	lastAll  uint64
 	primed   bool
+
+	// cgroup 口径的 CPU 累计时间（容器里才用）
+	cgPrimed bool
+	cgLastU  uint64
+	cgLastT  time.Time
 }
 
 // New 创建采集器。
@@ -54,15 +63,74 @@ func (c *Collector) Collect() Snapshot {
 	}
 	s.Supported = true
 
+	s.MemTotal, s.MemUsed, s.SwapTotal, s.SwapUsed = memInfo()
+
+	// 只有 cgroup 限额明显小于物理内存时才认为读到了容器视角。
+	// 真机上 memory.max 要么是 "max"，要么等于物理内存，这里不会命中。
+	if lim, use := cgroupMem(); lim > 0 && lim < s.MemTotal {
+		s.MemTotal, s.MemUsed = lim, use
+		if use > lim {
+			s.MemUsed = lim
+		}
+		s.Container = true
+	}
+
 	c.mu.Lock()
-	s.CPUPct = c.cpuPercentLocked()
+	if s.Container {
+		if pct, ok := c.cgroupPercentLocked(); ok {
+			s.CPUPct = pct
+		} else {
+			s.CPUPct = c.cpuPercentLocked()
+		}
+	} else {
+		s.CPUPct = c.cpuPercentLocked()
+	}
 	c.mu.Unlock()
 
-	s.MemTotal, s.MemUsed, s.SwapTotal, s.SwapUsed = memInfo()
 	s.Load1, s.Load5, s.Load15 = loadAvg()
 	s.UptimeSec = uptime()
 	s.DiskTotal, s.DiskUsed = diskUsage("/")
 	return s
+}
+
+// cgroupPercentLocked 用 cgroup 的累计 CPU 时间算容器自身的占用率。
+// 分母是「墙钟时间 × 配额核数」，所以 1 核配额跑满就是 100%。
+func (c *Collector) cgroupPercentLocked() (float64, bool) {
+	usage, cores, ok := cgroupCPU()
+	if !ok {
+		return 0, false
+	}
+	now := time.Now()
+	if !c.cgPrimed {
+		c.cgLastU, c.cgLastT, c.cgPrimed = usage, now, true
+		return 0, true
+	}
+	if usage < c.cgLastU {
+		// 计数回退（容器迁移 / 计数重置），重新取基线
+		c.cgLastU, c.cgLastT = usage, now
+		return 0, true
+	}
+	dU := float64(usage - c.cgLastU)
+	dT := now.Sub(c.cgLastT).Seconds() * 1e6
+	c.cgLastU, c.cgLastT = usage, now
+	if dT <= 0 {
+		return 0, true
+	}
+	if cores <= 0 {
+		// 没设 CPU 配额时，用可见核数当分母，口径与真机 /proc/stat 一致
+		cores = float64(runtime.NumCPU())
+	}
+	if cores <= 0 {
+		return 0, true
+	}
+	pct := dU / (dT * cores) * 100
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return pct, true
 }
 
 func (c *Collector) cpuPercentLocked() float64 {

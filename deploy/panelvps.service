@@ -37,7 +37,9 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# AF_NETLINK 必须保留：Web 终端里跑 ip / ss / systemctl 都依赖它，
+# 少了会出现「终端里 ip a 报 Protocol not supported」这种诡异现象。
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 # 仅保留面板确实需要的能力：改防火墙、切用户、读任意文件
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN CAP_DAC_OVERRIDE CAP_KILL CAP_SETUID CAP_SETGID
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN CAP_DAC_OVERRIDE CAP_KILL CAP_SETUID CAP_SETGID

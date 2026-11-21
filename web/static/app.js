@@ -273,9 +273,9 @@ function renderOverviewView(root) {
       const s = data.metrics;
       grid.replaceChildren(
         statCard("CPU", s.cpu_pct ? s.cpu_pct.toFixed(1) + "%" : "—",
-          "负载 " + s.load1.toFixed(2) + " / " + s.load5.toFixed(2) + " / " + s.load15.toFixed(2),
+          (s.container ? "宿主负载 " : "负载 ") + s.load1.toFixed(2) + " / " + s.load5.toFixed(2) + " / " + s.load15.toFixed(2),
           Math.round(s.cpu_pct)),
-        statCard("内存", fmtBytes(s.mem_used), "共 " + fmtBytes(s.mem_total), pct(s.mem_used, s.mem_total)),
+        statCard("内存", fmtBytes(s.mem_used), (s.container ? "cgroup 限额 " : "共 ") + fmtBytes(s.mem_total), pct(s.mem_used, s.mem_total)),
         statCard("磁盘", fmtBytes(s.disk_used), "共 " + fmtBytes(s.disk_total), pct(s.disk_used, s.disk_total)),
         statCard("面板占用", fmtBytes(s.panel_rss), s.goroutines + " goroutines"),
       );
@@ -292,6 +292,7 @@ function renderOverviewView(root) {
         ["数据库", data.db_path],
         ["审计条数", String(data.audit_count)],
         ["版本", data.version],
+        ["采集口径", s.container ? "cgroup 限额（容器内准确）" : "宿主机 /proc"],
         ["运行时长", Math.floor(s.uptime_sec / 3600) + " 小时 " + Math.floor((s.uptime_sec % 3600) / 60) + " 分"],
       ];
       infoBody.replaceChildren.apply(infoBody, rows.map(([k, v]) =>

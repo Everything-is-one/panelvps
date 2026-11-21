@@ -88,6 +88,58 @@ sudo ./deploy/install.sh
 ssh -L 20873:127.0.0.1:20873 root@<服务器IP>
 ```
 
+### 在 LXC / 容器里安装
+
+LXC 小鸡共享宿主内核，容器内的 systemd 通常**没有** `CAP_NET_ADMIN` / `CAP_SYS_ADMIN`，
+主单元里的 `AmbientCapabilities`、`MemoryMax`、`ProtectSystem=strict` 会让服务直接启动失败。
+安装脚本会自动识别容器并装上降级覆盖（`deploy/panelvps-container.conf`），不需要手工改。
+
+先体检，看清楚这台机器能用到哪些功能：
+
+```bash
+sudo ./deploy/install.sh --check
+```
+
+再安装：
+
+```bash
+sudo ./deploy/install.sh
+sudo journalctl -u panelvps | grep 初始管理员     # 取初始密码
+```
+
+`--check` 会逐项报告：
+
+| 输出 | 含义 | 非特权 LXC 的典型结果 |
+|---|---|---|
+| `CAP_NET_ADMIN` | 防火墙能否下发规则、能否封禁 IP | ❌ 只能查看，不能下发 |
+| `CAP_NET_BIND_SERVICE` / `ip_unprivileged_port_start` | 能否监听 80 / 443 | 视商家配置而定，常见 ❌ |
+| 防火墙后端 | 实际走 nftables 还是 iptables-legacy | ❌ none |
+| PTY | Web 终端能否连接 | ✅ 一般可用（需挂载 devpts） |
+| journald | 日志页与初始密码 | ✅ |
+| nginx / certbot / xray | 站点、证书、代理 | 需自行安装 |
+
+**能力不足时的替代路径**
+
+- **绑不了 80/443**：让宿主设置 `net.ipv4.ip_unprivileged_port_start=0`
+  （LXC 配置 `lxc.sysctl.net.ipv4.ip_unprivileged_port_start = 0`），
+  或让 Nginx 听 8080、由宿主 Nginx / 端口映射转发 80 → 8080。
+  站点配置里的 `listen` 目前固定 80/443，走这条路需要先在容器内用
+  `sysctl -w net.ipv4.ip_unprivileged_port_start=0` 验证是否允许。
+- **防火墙不可下发**：安全边界退化为「只监听 127.0.0.1 + SSH 隧道」。
+  在容器里刷 iptables 会和宿主规则打架，商家一般也不允许，不建议强求。
+- **想在 NAT 小鸡上直连面板**：把 `conf/panel.yaml` 的 `listen` 改成 `0.0.0.0:20873`，
+  再用商家给的端口映射访问；只做临时测试，测完改回 `127.0.0.1`。
+
+**只想先跑起来看看**（不装 systemd 服务）：
+
+```bash
+mkdir -p /opt/panelvps/{bin,conf,data}
+install -m 0755 panelvps-linux-amd64 /opt/panelvps/bin/panelvps
+/opt/panelvps/bin/panelvps serve -config /opt/panelvps/conf/panel.yaml
+```
+
+首次启动会打印初始密码；`Ctrl-C` 即停，数据留在 `/opt/panelvps/data`。
+
 ### 常用命令
 
 ```bash
@@ -97,6 +149,25 @@ panelvps info             # 配置、路径、账号数
 panelvps init             # 创建管理员
 panelvps reset-password   # 重置为随机密码并踢掉所有会话
 ```
+
+### 验收测试
+
+装完先跑一遍冒烟测试，它会逐项报告哪些能力在这台机器上**真的**可用：
+
+```bash
+pip3 install requests          # 唯一依赖
+PV_PASSWORD='初始密码' python3 scripts/smoke_test.py
+```
+
+只读模式 31 项，不改任何数据。加 `--write` 会额外验证上传 / 编辑 / 打包 / 解包、
+防火墙规则增删、建站与删站；文件放在 `_smoke` 临时目录、站点用 `smoke-*` 命名，结束时全部清理。
+
+```
+共 31 项：通过 27，失败 0，跳过 4
+```
+
+**SKIP 不是错误**：它表示该能力在当前环境不可用，例如非特权容器拿不到 `CAP_NET_ADMIN`、
+Windows 上无法创建 PTY。有 FAIL 时脚本以退出码 1 结束，可用于 CI。
 
 ## M0 已实现的契约
 
@@ -225,8 +296,8 @@ internal/
   version/           构建期注入的版本信息
   xray/              配置生成、进程托管、统计读取、分享链接与二维码
 web/                 embed 的前端静态资源（零构建原生 JS）
-deploy/              systemd 单元与安装脚本
-scripts/             构建脚本
+deploy/              systemd 单元、容器覆盖与安装脚本
+scripts/             构建脚本与冒烟测试（smoke_test.py）
 ```
 
 ## 文档
