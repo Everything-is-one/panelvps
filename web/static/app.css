@@ -240,8 +240,6 @@ p.sub { color: var(--muted); margin: 6px 0 0; font-size: 13.5px; line-height: 1.
   font-variant-numeric: tabular-nums; word-break: break-word;
 }
 .stat .d { font-size: 12.5px; color: var(--muted-2); margin-top: 6px; }
-/* 骨架态：别用 28px 的数值字号显示「加载中…」，太重了 */
-.stat .v.muted { font-size: 15px; font-weight: 500; color: var(--muted); letter-spacing: 0; }
 .stat-more {
   font-size: 10.5px; font-weight: 500; letter-spacing: .02em; color: var(--muted-2);
   border: 1px solid var(--border-strong); border-radius: 999px; padding: 0 6px; line-height: 16px;
