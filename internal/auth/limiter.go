@@ -57,7 +57,9 @@ func (l *LoginLimiter) Fail(key string) bool {
 
 	now := time.Now()
 	e, ok := l.entries[key]
-	if !ok || now.Sub(e.firstAt) > l.window {
+	// window <= 0 表示不按时间重置计数（否则 Linux 的纳秒级时钟会让
+	// now.Sub(firstAt) 恒大于 0，每来一次失败都重置，阈值永远达不到）
+	if !ok || (l.window > 0 && now.Sub(e.firstAt) > l.window) {
 		e = &attempt{firstAt: now}
 		l.entries[key] = e
 	}

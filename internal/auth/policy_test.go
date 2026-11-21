@@ -3,6 +3,7 @@ package auth
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidatePassword(t *testing.T) {
@@ -89,7 +90,8 @@ func TestSessionToken(t *testing.T) {
 }
 
 func TestLoginLimiterBlocks(t *testing.T) {
-	l := NewLoginLimiter(5, 0, 0) // 直接用零窗口，专注计数逻辑
+	// window=0 表示不按时间重置，专注计数逻辑
+	l := NewLoginLimiter(5, 0, 0)
 	for i := 0; i < 4; i++ {
 		if l.Fail("1.2.3.4") {
 			t.Fatalf("第 %d 次不应触发封禁", i+1)
@@ -101,5 +103,39 @@ func TestLoginLimiterBlocks(t *testing.T) {
 	l.Reset("1.2.3.4")
 	if l.Blocked("1.2.3.4") > 0 {
 		t.Fatal("重置后不应仍处于封禁状态")
+	}
+}
+
+// 真实窗口下：未过期时累计、过期后重新计数、封禁期 Blocked 为正。
+func TestLoginLimiterWindow(t *testing.T) {
+	l := NewLoginLimiter(3, 40*time.Millisecond, time.Minute)
+	if l.Fail("a") || l.Fail("a") {
+		t.Fatal("前两次不应封禁")
+	}
+	if !l.Fail("a") {
+		t.Fatal("第三次应封禁")
+	}
+	if l.Blocked("a") <= 0 {
+		t.Fatal("封禁后 Blocked 应为正")
+	}
+
+	// 窗口过得比 window 久之后，计数应重新开始而不是直接封禁
+	l2 := NewLoginLimiter(3, 40*time.Millisecond, time.Minute)
+	l2.Fail("b")
+	l2.Fail("b")
+	time.Sleep(80 * time.Millisecond)
+	if l2.Fail("b") {
+		t.Fatal("窗口已过期，第三次失败应按新一轮计数处理")
+	}
+}
+
+// window<=0 时计数不应被时钟精度重置（Linux 纳秒时钟曾让阈值永远达不到）。
+func TestLoginLimiterZeroWindowAccumulates(t *testing.T) {
+	l := NewLoginLimiter(2, 0, time.Minute)
+	if l.Fail("c") {
+		t.Fatal("第一次不应封禁")
+	}
+	if !l.Fail("c") {
+		t.Fatal("window=0 时第二次应触发封禁")
 	}
 }
