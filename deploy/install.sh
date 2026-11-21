@@ -276,6 +276,16 @@ if [[ ! -f "$CONF" ]]; then
     "$BIN" info -config "$CONF" >/dev/null 2>&1 || true
 fi
 
+# v0.3.0 改端口时会把 data_dir 的相对路径按执行目录固化成绝对路径，
+# 典型的残留是 /root/data 或 /data。升级上来的人需要知道这件事，
+# 否则服务仍然起不来，而且报错只有一行 exit 1。
+DATA_DIR_CFG=$(sed -n 's/^data_dir:[[:space:]]*//p' "$CONF" | head -1 | tr -d '"' || true)
+if [[ "$DATA_DIR_CFG" == /* && "$DATA_DIR_CFG" != "$DATA" ]]; then
+    warn "配置里的 data_dir 是 $DATA_DIR_CFG，不是安装目录 $DATA"
+    warn "如果这是改端口后出现的，数据其实还在 $DATA，执行："
+    warn "  sed -i 's|^data_dir:.*|data_dir: ./data|' $CONF && systemctl restart panelvps"
+fi
+
 if [[ "$PUBLIC" -eq 1 ]]; then
     CFG_PORT=$(grep -E '^listen:' "$CONF" | sed 's/.*://' | tr -d ' ' || true)
     CFG_PORT=${CFG_PORT:-20873}

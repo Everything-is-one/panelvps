@@ -5,8 +5,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/main/deploy/bootstrap.sh | sudo bash
 #
 # 安装指定版本（脚本与二进制都锁在该 tag，生产环境推荐）：
-#   curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.3.0/deploy/bootstrap.sh \
-#     | sudo bash -s -- --ref v0.3.0
+#   curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.3.1/deploy/bootstrap.sh \
+#     | sudo bash -s -- --ref v0.3.1
 #
 # 自建分发（国内访问 GitHub 慢时用，目录里放 bootstrap.sh + install.sh + 两个 conf + bin/ + SHA256SUMS）：
 #   curl -fsSL https://你的域名/panelvps/bootstrap.sh | sudo bash
