@@ -71,6 +71,36 @@ func (s *Server) handleFileList(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleFileSearch 在指定目录下按文件名搜索。
+//
+// 没有索引，纯遍历：默认最多翻 6 层、命中 200 条、遍历 20 万个条目就停。
+// 这些上限由 filemgr.Search 内部兜底，前端只负责把 truncated 显示成提示。
+func (s *Server) handleFileSearch(w http.ResponseWriter, r *http.Request) {
+	if !s.filesReady(w) {
+		return
+	}
+	q := r.URL.Query().Get("q")
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	depth, _ := strconv.Atoi(r.URL.Query().Get("depth"))
+	items, truncated, err := s.files.Search(r.Context(), r.URL.Query().Get("path"), filemgr.SearchOptions{
+		Query:    q,
+		Limit:    limit,
+		MaxDepth: depth,
+	})
+	if err != nil {
+		fileErr(w, err)
+		return
+	}
+	if items == nil {
+		items = []filemgr.Entry{}
+	}
+	ok(w, map[string]any{
+		"items":     items,
+		"truncated": truncated,
+		"query":     q,
+	})
+}
+
 func (s *Server) handleFileStat(w http.ResponseWriter, r *http.Request) {
 	if !s.filesReady(w) {
 		return

@@ -3,6 +3,7 @@ package filemgr
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -169,5 +170,77 @@ func TestReadAllSizeLimit(t *testing.T) {
 	}
 	if _, err := m.ReadAll("big.bin"); !errors.Is(err, ErrTooLarge) {
 		t.Errorf("应返回 ErrTooLarge，实际 %v", err)
+	}
+}
+
+func TestSearchFindsByName(t *testing.T) {
+	m := newTestManager(t)
+	write := func(rel string) {
+		p := filepath.Join(m.Root(), filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("app/config.yaml")
+	write("app/sub/config.backup.yaml")
+	write("logs/nginx.log")
+	write("config.yaml")
+
+	items, truncated, err := m.Search(context.Background(), "", SearchOptions{Query: "CONFIG"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if truncated {
+		t.Fatal("不该被截断")
+	}
+	if len(items) != 3 {
+		t.Fatalf("命中 %d 项, 期望 3: %+v", len(items), items)
+	}
+	paths := map[string]bool{}
+	for _, it := range items {
+		paths[it.Path] = true
+	}
+	for _, want := range []string{"config.yaml", "app/config.yaml", "app/sub/config.backup.yaml"} {
+		if !paths[want] {
+			t.Errorf("缺少结果 %q，实际 %v", want, paths)
+		}
+	}
+}
+
+func TestSearchRespectsDepthAndLimit(t *testing.T) {
+	m := newTestManager(t)
+	deep := filepath.Join(m.Root(), "a", "b", "c", "d")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deep, "hit.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 深度 2 时 a/b/c/d 以下不该被翻到
+	items, _, err := m.Search(context.Background(), "", SearchOptions{Query: "hit", MaxDepth: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("超过深度的文件不该命中，实际 %+v", items)
+	}
+
+	// 深度够时应命中
+	items, _, err = m.Search(context.Background(), "", SearchOptions{Query: "hit", MaxDepth: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Name != "hit.txt" {
+		t.Fatalf("期望命中 hit.txt，实际 %+v", items)
+	}
+}
+
+func TestSearchRequiresQuery(t *testing.T) {
+	m := newTestManager(t)
+	if _, _, err := m.Search(context.Background(), "", SearchOptions{Query: "  "}); err == nil {
+		t.Fatal("空关键词应报错")
 	}
 }

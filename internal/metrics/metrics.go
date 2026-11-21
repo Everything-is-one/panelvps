@@ -30,6 +30,11 @@ type Snapshot struct {
 	Supported  bool    `json:"supported"`
 	PanelRSS   uint64  `json:"panel_rss"`
 	Goroutines int     `json:"goroutines"`
+	// MemCache 是 cgroup 口径下可回收的文件页缓存（memory.stat 的 file
+	// 减去 tmpfs 的 shmem），不计入 MemUsed。单独带出来是为了让概览能
+	// 写清「已用 + 缓存 = 容器总量」，不至于把升级时写盘产生的缓存当成
+	// 内存泄漏。
+	MemCache uint64 `json:"mem_cache"`
 	// Container 表示内存与 CPU 数据来自 cgroup 限额而非宿主机 /proc。
 	// LXC 默认不挂 lxcfs 时，/proc 报的是宿主机数据，必须用 cgroup 纠正。
 	Container bool `json:"container"`
@@ -67,8 +72,11 @@ func (c *Collector) Collect() Snapshot {
 
 	// 只有 cgroup 限额明显小于物理内存时才认为读到了容器视角。
 	// 真机上 memory.max 要么是 "max"，要么等于物理内存，这里不会命中。
-	if lim, use := cgroupMem(); lim > 0 && lim < s.MemTotal {
-		s.MemTotal, s.MemUsed = lim, use
+	// 用量取「current - 可回收文件页」：memory.current 里含 page cache，
+	// 面板更新一次写十几 MB 二进制就会让它涨一大截，直接展示会把
+	// 可回收的缓存报成进程占用。
+	if lim, use, cache := cgroupMemDetail(); lim > 0 && lim < s.MemTotal {
+		s.MemTotal, s.MemUsed, s.MemCache = lim, use, cache
 		if use > lim {
 			s.MemUsed = lim
 		}

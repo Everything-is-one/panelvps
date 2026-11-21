@@ -185,10 +185,14 @@ p.sub { color: var(--muted); margin: 6px 0 0; font-size: 13.5px; line-height: 1.
 .topbar .row { gap: 8px; }
 .view { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
 /* 两栏键值表在 1024 这种宽度下每栏只有 380px，标签列一占，
- * 路径就被挤成三行。窄于 ~900 时干脆叠成一列，宁可长一点。 */
-/* 选择器要压过 .grid.g2，否则 minmax(340px) 那套继续生效 */
+ * 路径就被挤成三行。窄于 ~900 时干脆叠成一列，宁可长一点。
+ * 选择器要压过 .grid.g2，否则 minmax(340px) 那套继续生效。
+ *
+ * 两栏的条目数天生不等（面板信息 8 条、系统环境 7 条）。start 让每张卡
+ * 按内容收边，下边缘就差了一整行——并排看像是没对齐。改 stretch 让两卡
+ * 等高：行高与分隔线仍逐行对齐，多出来的空间落在条目少的那张底部。 */
 .grid.g2.overview-meta {
-  align-items: start;
+  align-items: stretch;
   grid-template-columns: repeat(auto-fit, minmax(440px, 1fr));
 }
 
@@ -701,6 +705,10 @@ table.store-table .app-slug { font-size: 12px; color: var(--muted-2); letter-spa
 
 .path-row { display: flex; margin-bottom: 12px; }
 
+/* 搜索框吃掉工具栏剩余宽度，窄屏时换行占满一整行 */
+.search-box { display: flex; align-items: center; gap: 8px; flex: 1 1 280px; min-width: 220px; }
+.search-box input { flex: 1 1 auto; min-width: 0; }
+
 .selection-bar {
   display: flex; align-items: center; flex-wrap: wrap; gap: 12px;
   margin-top: 12px; padding: 9px 12px 9px 14px;
@@ -756,6 +764,80 @@ table.files tr.row-up td { padding-top: 10px; padding-bottom: 10px; background: 
 .top-track i { display: block; height: 100%; border-radius: 999px; background: var(--accent); }
 .top-sub { margin-top: 3px; font-size: 11.5px; color: var(--muted-2); font-variant-numeric: tabular-nums; }
 .top-empty { padding: 12px 0 6px; text-align: center; font-size: 13px; color: var(--muted); }
+
+/* ---------- 磁盘占用明细 ---------- */
+
+.du-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.du-head .spacer { flex: 1 1 auto; }
+.du-path {
+  flex: 1 1 200px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 7px 11px; font-size: 13px; color: var(--text-2);
+}
+.du-progress { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; color: var(--text-2); }
+.du-spinner {
+  width: 14px; height: 14px; border-radius: 50%; flex: 0 0 14px;
+  border: 2px solid var(--border-strong); border-top-color: var(--accent);
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+table.du-table td, table.du-table th { white-space: nowrap; }
+table.du-table td.du-name { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+.du-size { font-variant-numeric: tabular-nums; }
+.du-bar { width: 96px; }
+.du-share { display: flex; align-items: center; gap: 9px; }
+.stat-clickable { cursor: pointer; }
+.top-foot {
+  margin-top: 12px; padding-top: 9px; border-top: 1px solid var(--border);
+  font-size: 11.5px; color: var(--muted-2);
+}
+
+/* ---------- 终端标签 ---------- */
+
+.term-tabs {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--border); margin: 14px 0 0;
+}
+.term-tab {
+  display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 8px 0 12px;
+  border: 1px solid transparent; border-bottom: none; border-radius: 10px 10px 0 0;
+  cursor: pointer; font-size: 13px; color: var(--muted); position: relative; top: 1px;
+  user-select: none;
+}
+.term-tab:hover { background: var(--surface-3); color: var(--text); }
+.term-tab.active { background: var(--surface); border-color: var(--border); color: var(--text); font-weight: 600; }
+.term-tab-label { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-tab-close {
+  border: 0; background: transparent; color: var(--muted-2); cursor: pointer;
+  font-size: 15px; line-height: 1; padding: 2px 5px; border-radius: 6px;
+}
+.term-tab-close:hover { background: var(--danger-soft); color: var(--danger); }
+.term-tab-add {
+  height: 30px; padding: 0 10px; font-size: 12.5px; border-radius: 8px;
+  border: 1px dashed var(--border-strong); background: transparent; color: var(--muted); cursor: pointer;
+}
+.term-tab-add:hover { color: var(--accent); border-color: var(--accent-border); }
+.term-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border-strong); flex: 0 0 auto; }
+.term-dot.open { background: var(--ok); }
+.term-dot.connecting { background: var(--warn); }
+.term-dot.error { background: var(--danger); }
+.term-pane { display: none; }
+.term-pane.active { display: block; }
+.term-pane .term-host { margin-top: 10px; }
+
+/* ---------- 安全记录 ---------- */
+
+.sec-ip { font-variant-numeric: tabular-nums; }
+.sec-detail {
+  max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-2); font-size: 13px;
+}
+/* 窄屏（含侧边栏约 780px 主区）放不下六列：先舍「最近一次」，
+ * 比让整张表横向滚动更好读——时间是次要信息。 */
+@media (max-width: 1180px) {
+  table.sec-table th:nth-child(4), table.sec-table td:nth-child(4) { display: none; }
+  .sec-detail { max-width: 200px; }
+}
 
 /* ---------- 响应式补充 ---------- */
 

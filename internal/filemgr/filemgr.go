@@ -14,9 +14,11 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -220,6 +222,135 @@ func (m *Manager) List(rel string, showHidden bool) ([]Entry, error) {
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
 	return out, nil
+}
+
+// SearchOptions 控制一次文件名搜索的边界。
+//
+// 搜索是在实时文件系统上遍历，没有索引，必须设上限：目录再深也就
+// 翻 maxDepth 层，命中数到 limit 就停，遍历过的条目数也有硬上限。
+// 否则一次在 / 上搜索就能把面板的 CPU 和磁盘 IO 全部占住。
+type SearchOptions struct {
+	Query    string
+	Limit    int
+	MaxDepth int
+	// MaxVisited 是遍历条目总数上限，0 用默认值。
+	MaxVisited int
+}
+
+// Search 在 rel 目录下按文件名包含关系搜索（大小写不敏感）。
+// 返回 truncated 表示因为条数/深度/遍历量上限提前结束，结果不完整。
+func (m *Manager) Search(ctx context.Context, rel string, opt SearchOptions) ([]Entry, bool, error) {
+	base, err := m.Resolve(rel)
+	if err != nil {
+		return nil, false, err
+	}
+	fi, err := os.Stat(base)
+	if err != nil {
+		return nil, false, err
+	}
+	if !fi.IsDir() {
+		return nil, false, errors.New("目标不是目录")
+	}
+	q := strings.ToLower(strings.TrimSpace(opt.Query))
+	if q == "" {
+		return nil, false, errors.New("请输入搜索关键词")
+	}
+	limit := opt.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	maxDepth := opt.MaxDepth
+	if maxDepth <= 0 || maxDepth > 32 {
+		maxDepth = 6
+	}
+	maxVisited := opt.MaxVisited
+	if maxVisited <= 0 {
+		maxVisited = 200000
+	}
+
+	var out []Entry
+	visited := 0
+	truncated := false
+
+	walkErr := filepath.WalkDir(base, func(p string, de fs.DirEntry, walkErr error) error {
+		if ctx != nil && ctx.Err() != nil {
+			truncated = true
+			return filepath.SkipAll
+		}
+		if walkErr != nil {
+			if de != nil && de.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if p == base {
+			return nil
+		}
+		visited++
+		if visited > maxVisited {
+			truncated = true
+			return filepath.SkipAll
+		}
+
+		relPath := m.rel(p)
+		depth := strings.Count(filepath.ToSlash(relPath), "/")
+		if de.IsDir() {
+			// 目录不匹配也算命中（用户往往想跳到某个目录），
+			// 但太深的子树不再往下翻。
+			if depth >= maxDepth {
+				if strings.Contains(strings.ToLower(de.Name()), q) && len(out) < limit {
+					out = append(out, m.entryOf(p, de))
+				}
+				return filepath.SkipDir
+			}
+			if strings.Contains(strings.ToLower(de.Name()), q) && len(out) < limit {
+				out = append(out, m.entryOf(p, de))
+			}
+			return nil
+		}
+		if !strings.Contains(strings.ToLower(de.Name()), q) {
+			return nil
+		}
+		out = append(out, m.entryOf(p, de))
+		if len(out) >= limit {
+			truncated = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if walkErr != nil && !errors.Is(walkErr, filepath.SkipAll) {
+		return nil, truncated, walkErr
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].IsDir != out[j].IsDir {
+			return out[i].IsDir
+		}
+		return strings.ToLower(out[i].Path) < strings.ToLower(out[j].Path)
+	})
+	return out, truncated, nil
+}
+
+// entryOf 把 WalkDir 的条目转成 Entry（与 List 的字段口径一致）。
+func (m *Manager) entryOf(abs string, de fs.DirEntry) Entry {
+	info, err := de.Info()
+	e := Entry{
+		Name:   de.Name(),
+		Path:   m.rel(abs),
+		IsDir:  de.IsDir(),
+		IsLink: de.Type()&fs.ModeSymlink != 0,
+	}
+	if err == nil {
+		e.Size = info.Size()
+		e.Mode = info.Mode().String()
+		e.ModTime = info.ModTime()
+	}
+	if e.IsLink {
+		if target, err := os.Readlink(abs); err == nil {
+			e.Target = target
+		}
+	}
+	return e
 }
 
 // Open 打开普通文件用于下载。调用方负责关闭。

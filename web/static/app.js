@@ -151,6 +151,12 @@ function pct(used, total) {
   return Math.min(100, Math.round((used / total) * 100));
 }
 
+// 千分位：目录里动辄十几万文件，184233 一眼看不出量级
+function fmtNum(n) {
+  const v = Number(n) || 0;
+  return v.toLocaleString("en-US");
+}
+
 function bar(percent) {
   const cls = percent >= 90 ? "bar crit" : percent >= 75 ? "bar warn" : "bar";
   const inner = el("i");
@@ -164,10 +170,20 @@ function statCard(key, value, desc, percent, topKind) {
   if (percent !== undefined) kids.push(bar(percent));
   if (desc) kids.push(el("div", { class: "d", text: desc }));
   if (topKind) {
-    // 给卡片一个「前 5」角标，否则用户不知道这里可以 hover
-    kids[0].appendChild(el("span", { class: "stat-more", text: "前 5" }));
+    // 磁盘卡片能点开明细，所以角标写「明细」而不是「前 5」：
+    // 提示语和实际行为对不上，用户就会一直只 hover 不点。
+    kids[0].appendChild(el("span", { class: "stat-more", text: topKind === "disk" ? "明细" : "前 5" }));
     const box = el("div", { class: "stat" }, kids);
     bindTopTip(box, topKind, key);
+    if (topKind === "disk") {
+      box.classList.add("stat-clickable");
+      box.title = "点击查看磁盘占用明细";
+      box.addEventListener("click", () => openDiskUsage("/"));
+      // 卡片本身可聚焦（bindTopTip 给的 tabIndex），键盘也要能打开明细
+      box.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDiskUsage("/"); }
+      });
+    }
     return box;
   }
   return el("div", { class: "stat" }, kids);
@@ -230,6 +246,61 @@ function topTipRow(name, value, ratio, sub) {
   ]);
 }
 
+// 磁盘不是「进程排行」：真正吃空间的是目录和文件。所以磁盘卡片的浮层
+// 走另一个接口（/system/disk-usage），异步扫描后按目录大小排序。
+async function fetchDiskUsage(path, refresh) {
+  return api("GET", "/api/v1/system/disk-usage?path=" + encodeURIComponent(path) + (refresh ? "&refresh=1" : ""));
+}
+
+function diskTipRows(report) {
+  const items = (report.items || []).filter((it) => it.size > 0).slice(0, 5);
+  if (!items.length) return [el("div", { class: "top-empty", text: "该目录下没有可统计的文件" })];
+  const max = items[0].size || 1;
+  const rows = items.map((it) => topTipRow(
+    it.name + (it.is_dir ? "/" : ""),
+    fmtBytes(it.size),
+    (it.size / max) * 100,
+    pct(it.size, report.total) + "% · " + fmtNum(it.files) + " 个文件",
+  ));
+  rows.push(el("div", {
+    class: "top-foot",
+    text: "合计 " + fmtBytes(report.total) + " · " + (report.partial ? "未扫完，点击卡片看明细" : "点击卡片查看明细"),
+  }));
+  return rows;
+}
+
+// 首次扫描可能要几秒，浮层里就地显示进度并轮询，不让用户以为没反应。
+async function diskTipLoop(tip, seq, card) {
+  const body = tip.querySelector(".top-body");
+  for (let i = 0; i < 120; i++) {
+    let st;
+    try {
+      st = await fetchDiskUsage("/", false);
+    } catch (e) {
+      if (seq === topSeq) body.replaceChildren(el("div", { class: "top-empty", text: e.message }));
+      return;
+    }
+    if (seq !== topSeq) return;
+    if (st.state === "running") {
+      body.replaceChildren(el("div", {
+        class: "top-empty",
+        text: "正在统计目录大小… 已扫描 " + fmtNum(st.scanned) + " 个文件 · " + (st.elapsed_ms / 1000).toFixed(0) + "s",
+      }));
+      tipPosition(tip, card.getBoundingClientRect());
+      await new Promise((r) => setTimeout(r, 700));
+      continue;
+    }
+    if (st.state === "failed") {
+      body.replaceChildren(el("div", { class: "top-empty", text: st.error || "扫描失败" }));
+      return;
+    }
+    body.replaceChildren.apply(body, diskTipRows(st.report || {}));
+    tipPosition(tip, card.getBoundingClientRect());
+    return;
+  }
+  if (seq === topSeq) body.replaceChildren(el("div", { class: "top-empty", text: "扫描时间过长，请点击卡片查看" }));
+}
+
 function topTipBody(kind, data) {
   const items = data.items || [];
   if (!data.supported || !items.length) {
@@ -237,14 +308,10 @@ function topTipBody(kind, data) {
   }
   let max = 1;
   for (const it of items) {
-    const v = kind === "cpu" ? it.cpu_pct : kind === "disk" ? it.pct : it.rss;
+    const v = kind === "cpu" ? it.cpu_pct : it.rss;
     if (v > max) max = v;
   }
   const rows = items.map((it) => {
-    if (kind === "disk") {
-      return topTipRow(it.path, pct(it.used, it.total) + "%", (it.pct / max) * 100,
-        fmtBytes(it.used) + " / " + fmtBytes(it.total) + " · " + it.fstype);
-    }
     if (kind === "mem") {
       return topTipRow(it.name, fmtBytes(it.rss), (it.rss / max) * 100,
         "PID " + it.pid + " · 占内存 " + (it.mem_pct || 0).toFixed(1) + "%");
@@ -259,17 +326,23 @@ async function showTopTip(card, kind, label) {
   const seq = ++topSeq;
   const tip = topTip();
   const rect = card.getBoundingClientRect();
+  const isDisk = kind === "disk";
   tip.replaceChildren(
     el("div", { class: "top-head" }, [
-      el("span", { class: "top-title", text: (TOP_LABEL[kind] || label) + "前 5" }),
-      el("span", { class: "top-stamp", text: "近 5 秒" }),
+      el("span", { class: "top-title", text: isDisk ? "占空间最多的目录" : (TOP_LABEL[kind] || label) + "前 5" }),
+      el("span", { class: "top-stamp", text: isDisk ? "逐目录统计" : "近 5 秒" }),
     ]),
-    el("div", { class: "top-body" }, [el("div", { class: "top-empty", text: "采样中…" })]),
+    el("div", { class: "top-body" }, [el("div", { class: "top-empty", text: isDisk ? "正在统计目录大小…" : "采样中…" })]),
   );
   tip.style.display = "block";
   tip.style.visibility = "hidden";
   tipPosition(tip, rect);
   tip.style.visibility = "";
+
+  if (isDisk) {
+    await diskTipLoop(tip, seq, card);
+    return;
+  }
 
   try {
     const data = await fetchTop(kind);
@@ -310,6 +383,124 @@ function bindTopTip(card, kind, label) {
   card.addEventListener("mouseleave", () => { clearTimeout(topShowTimer); scheduleHideTip(); });
   card.addEventListener("focus", show);
   card.addEventListener("blur", () => scheduleHideTip());
+}
+
+// ---------- 磁盘占用明细 ----------
+//
+// 「一共用了 48G」没有意义，用户要知道的是哪个目录吃掉的。
+// 弹窗里按目录大小排，点目录继续下钻，直到找到具体文件。
+function parentPath(p) {
+  if (!p || p === "/") return "/";
+  const cut = p.replace(/\/+$/, "");
+  const i = cut.lastIndexOf("/");
+  return i <= 0 ? "/" : cut.slice(0, i);
+}
+
+function openDiskUsage(startPath) {
+  let path = startPath || "/";
+  let seq = 0;
+  let timer = null;
+  const body = el("div");
+  const m = modal("磁盘占用分析", [body], () => {
+    seq++;
+    if (timer) clearTimeout(timer);
+  });
+  m.box.style.maxWidth = "780px";
+
+  const stop = () => { if (timer) { clearTimeout(timer); timer = null; } };
+
+  const paintProgress = (st) => {
+    body.replaceChildren(
+      el("div", { class: "du-head" }, [el("span", { class: "mono du-path", text: st.path || path })]),
+      el("div", { class: "du-progress" }, [
+        el("div", { class: "du-spinner" }),
+        el("span", { text: "正在统计目录大小…" }),
+        el("span", { class: "hint mono", text: fmtNum(st.scanned) + " 个文件 · " + (st.elapsed_ms / 1000).toFixed(1) + "s" }),
+      ]),
+      el("div", { class: "hint", style: "margin-top:10px", text: "首次统计需要遍历目录，几秒到几十秒不等；结果会缓存 3 分钟。" }),
+    );
+  };
+
+  const paintError = (text) => {
+    body.replaceChildren(
+      el("div", { class: "msg err", text: text }),
+      el("div", { class: "row", style: "margin-top:10px" }, [
+        el("button", { class: "ghost", text: "重试", onclick: () => load(false) }),
+      ]),
+    );
+  };
+
+  const paintReport = (report) => {
+    const head = el("div", { class: "du-head" }, [
+      el("span", { class: "mono du-path", text: report.path }),
+      el("div", { class: "spacer" }),
+      path !== "/" ? el("button", { class: "ghost", text: "上一级", onclick: () => { path = parentPath(path); load(false); } }) : null,
+      el("button", { class: "ghost", text: "重新扫描", onclick: () => load(true) }),
+    ]);
+
+    const items = (report.items || []).filter((it) => it.size > 0);
+    const summary = el("div", { class: "hint", text:
+      "合计 " + fmtBytes(report.total) + " · " + fmtNum(report.files) + " 个文件 · 用时 " + (report.elapsed_ms / 1000).toFixed(1) + "s" +
+      (report.partial ? " · 未扫完（超时或文件过多，数字偏小）" : "") });
+
+    if (!items.length) {
+      body.replaceChildren(head, summary, el("div", { class: "empty", style: "padding:26px 0", text: "该目录下没有文件" }));
+      return;
+    }
+
+    const rows = items.map((it) => {
+      const nameEl = it.is_dir
+        ? el("button", { class: "link", text: it.name + "/", onclick: () => { path = it.path; load(false); } })
+        : el("span", { text: it.name });
+      return el("tr", {}, [
+        el("td", { class: "du-name" }, [nameEl]),
+        el("td", { class: "mono du-size", text: fmtBytes(it.size) }),
+        el("td", {}, [el("div", { class: "du-share" }, [
+          el("div", { class: "du-bar" }, [bar(pct(it.size, report.total))]),
+          el("span", { class: "mono muted", text: pct(it.size, report.total) + "%" }),
+        ])]),
+        el("td", { class: "mono muted", text: fmtNum(it.files) }),
+      ]);
+    });
+
+    body.replaceChildren(
+      head,
+      summary,
+      el("div", { class: "table-wrap", style: "margin-top:10px" }, [
+        el("table", { class: "data du-table" }, [
+          el("thead", {}, [el("tr", {}, [
+            el("th", { text: "名称" }),
+            el("th", { text: "大小" }),
+            el("th", { text: "占本目录" }),
+            el("th", { text: "文件数" }),
+          ])]),
+          el("tbody", {}, rows),
+        ]),
+      ]),
+      el("div", { class: "hint", style: "margin-top:10px", text: "点目录名继续下钻；数字按实际占用块统计，与 du 口径一致（不跨文件系统）。" }),
+    );
+  };
+
+  const load = async (refresh) => {
+    const my = ++seq;
+    stop();
+    body.replaceChildren(el("div", { class: "hint", text: "读取中…" }));
+    try {
+      const st = await fetchDiskUsage(path, refresh);
+      if (my !== seq) return;
+      if (st.state === "running") {
+        paintProgress(st);
+        timer = setTimeout(() => load(false), 800);
+        return;
+      }
+      if (st.state === "failed") { paintError(st.error || "扫描失败"); return; }
+      paintReport(st.report || {});
+    } catch (e) {
+      if (my === seq) paintError(e.message);
+    }
+  };
+
+  load(false);
 }
 
 function badge(text, kind) {
@@ -454,7 +645,7 @@ const NAV_ICONS = {
 // 段标题用小号灰字，视觉上形成节奏。
 const NAV_GROUPS = [
   ["", [["overview", "概览"]]],
-  ["网络", [["proxy", "代理"], ["users", "用户"], ["relay", "中转"], ["sites", "网站"], ["firewall", "防火墙"]]],
+  ["网络", [["proxy", "代理"], ["users", "用户"], ["relay", "中转"], ["sites", "网站"], ["firewall", "安全"]]],
   ["系统", [["files", "文件"], ["terminal", "终端"], ["logs", "日志"],
             ["store", "商店"], ["backup", "备份"], ["settings", "设置"]]],
 ];
@@ -467,7 +658,7 @@ const VIEW_META = {
   sites: ["网站", "Nginx 站点与证书"],
   files: ["文件", "浏览、编辑服务器文件"],
   terminal: ["终端", "以 root 身份执行命令"],
-  firewall: ["防火墙", "规则、封禁与 SSH 保护"],
+  firewall: ["安全", "防火墙、封禁与外网扫描爆破记录"],
   logs: ["日志", "面板运行日志与系统日志"],
   store: ["商店", "一键安装常用服务"],
   backup: ["备份", "数据库、配置与站点打包"],
@@ -583,7 +774,7 @@ function renderApp(view) {
     case "sites": renderSitesView(content); break;
     case "files": renderFilesView(content); break;
     case "terminal": renderTerminalView(content); break;
-    case "firewall": renderFirewallView(content); break;
+    case "firewall": renderSecurityView(content); break;
     case "logs": renderLogsView(content); break;
     case "store": renderStoreView(content); break;
     case "backup": renderBackupView(content); break;
@@ -607,6 +798,17 @@ function tableNoticeRow(text, cols, action) {
   const cell = el("td", { colspan: String(cols || 2), class: "table-notice" }, [el("span", { text: text })]);
   if (action) cell.appendChild(action);
   return el("tr", {}, [cell]);
+}
+
+// 内存卡片的副标题。容器口径下后端已经把可回收的文件页缓存从「已用」里
+// 扣掉（memory.current 含 page cache），这里再把缓存写出来，让
+// 「已用 + 缓存 = 容器总量」这笔账能对上：升级一次面板要写十几 MB 的
+// 新二进制，缓存随之上涨，不写清楚很容易被当成内存泄漏。
+function memDetail(s) {
+  const base = (s.container ? "cgroup 限额 " : "共 ") + fmtBytes(s.mem_total);
+  const cache = typeof s.mem_cache === "number" ? s.mem_cache : 0;
+  if (cache < 16 * 1024 * 1024) return base;
+  return base + " · 缓存 " + fmtBytes(cache);
 }
 
 function renderOverviewView(root) {
@@ -673,7 +875,7 @@ function renderOverviewView(root) {
         statCard("CPU", s.cpu_pct ? num(s.cpu_pct).toFixed(1) + "%" : "—",
           (s.container ? "宿主负载 " : "负载 ") + num(s.load1).toFixed(2) + " / " + num(s.load5).toFixed(2) + " / " + num(s.load15).toFixed(2),
           Math.round(num(s.cpu_pct)), "cpu"),
-        statCard("内存", fmtBytes(s.mem_used), (s.container ? "cgroup 限额 " : "共 ") + fmtBytes(s.mem_total), pct(s.mem_used, s.mem_total), "mem"),
+        statCard("内存", fmtBytes(s.mem_used), memDetail(s), pct(s.mem_used, s.mem_total), "mem"),
         statCard("磁盘", fmtBytes(s.disk_used), "共 " + fmtBytes(s.disk_total), pct(s.disk_used, s.disk_total), "disk"),
         statCard("面板占用", fmtBytes(s.panel_rss), num(s.goroutines) + " goroutines"),
       );
@@ -691,7 +893,7 @@ function renderOverviewView(root) {
         ["数据库", data.db_path],
         ["审计条数", String(data.audit_count)],
         ["版本", data.version],
-        ["采集口径", s.container ? "cgroup 限额（容器内准确）" : "宿主机 /proc"],
+        ["采集口径", s.container ? "cgroup 限额（已扣可回收页缓存）" : "宿主机 /proc"],
         ["运行时长", Math.floor(up / 3600) + " 小时 " + Math.floor((up % 3600) / 60) + " 分"],
       ];
       infoBody.replaceChildren.apply(infoBody, rows.map(([k, v]) =>
@@ -1593,6 +1795,9 @@ function renderFilesView(root) {
   const selBar = el("div", { class: "selection-bar", style: "display:none" });
   const selText = el("span", { class: "selection-text" });
   const selBytes = el("span", { class: "selection-size" });
+  const searchInput = el("input", { type: "search", placeholder: "搜索当前目录及子目录的文件名…" });
+  const exitSearchBtn = el("button", { class: "link", text: "退出搜索", style: "display:none" });
+  let searching = false;
 
   const syncSelection = () => {
     let bytes = 0, files = 0;
@@ -1642,6 +1847,8 @@ function renderFilesView(root) {
     try {
       const data = await api("GET", "/api/v1/files?path=" + encodeURIComponent(cwd) + "&hidden=1");
       pathBar.textContent = "/" + (data.path || "");
+      searching = false;
+      exitSearchBtn.style.display = "none";
       selected.clear();
       renderList(data);
       msg.textContent = "";
@@ -1649,6 +1856,82 @@ function renderFilesView(root) {
       if (err.status === 401) { renderLogin("会话已失效，请重新登录"); return; }
       msg.className = "msg err";
       msg.textContent = err.message;
+    }
+  };
+
+  // 搜索不做索引，直接在实时目录树上遍历（默认 6 层 / 200 条上限）。
+  // 结果表比普通列表多一列「所在目录」，因为同名文件在不同目录里很常见。
+  const renderSearchResults = (d, q) => {
+    const items = d.items || [];
+    listed = [];
+    rowCbs.clear();
+    rowEls.clear();
+    lastPick = -1;
+    syncSelection();
+    pathBar.textContent = "搜索「" + q + "」· 范围 /" + (cwd || "");
+    selBar.style.display = "none";
+    exitSearchBtn.style.display = "";
+
+    if (!items.length) {
+      listBox.replaceChildren(el("div", { class: "hint", style: "padding:28px;text-align:center", text: "没有匹配的文件或目录" }));
+      return;
+    }
+    const rows = items.map((e) => {
+      const name = el("span", { class: "file-name" + (e.is_dir ? " dir" : ""), text: e.name + (e.is_link ? " ↗" : "") });
+      name.addEventListener("click", () => {
+        if (e.is_dir) { cwd = e.path; exitSearch(); } else { openFile(e.path); }
+      });
+      const parent = e.path.includes("/") ? e.path.slice(0, e.path.lastIndexOf("/")) : "";
+      return el("tr", {}, [
+        el("td", {}, [name]),
+        el("td", { class: "mono muted", text: "/" + parent }),
+        el("td", { class: "mono", text: e.is_dir ? "—" : fmtBytes(e.size) }),
+        el("td", { class: "mono", text: fmtTime(e.mod_time) }),
+        el("td", {}, [el("div", { class: "row" }, [
+          el("button", { class: "link", text: "定位", onclick: () => {
+            cwd = e.is_dir ? e.path : parent;
+            exitSearch();
+          } }),
+          e.is_dir ? null : el("button", { class: "link", text: "下载", onclick: () => {
+            window.location.href = "/api/v1/files/download?path=" + encodeURIComponent(e.path);
+          } }),
+        ])]),
+      ]);
+    });
+    listBox.replaceChildren(el("table", { class: "data files" }, [
+      el("thead", {}, [el("tr", {}, [
+        el("th", { text: "名称" }),
+        el("th", { text: "所在目录" }),
+        el("th", { text: "大小" }),
+        el("th", { text: "修改时间" }),
+        el("th", { text: "操作" }),
+      ])]),
+      el("tbody", {}, rows),
+    ]));
+  };
+
+  const exitSearch = () => {
+    searchInput.value = "";
+    searching = false;
+    refresh();
+  };
+
+  const runSearch = async () => {
+    const q = searchInput.value.trim();
+    if (!q) { exitSearch(); return; }
+    msg.className = "msg";
+    msg.textContent = "搜索中…（大目录可能要几秒）";
+    try {
+      const d = await api("GET", "/api/v1/files/search?path=" + encodeURIComponent(cwd) +
+        "&q=" + encodeURIComponent(q) + "&limit=200&depth=6", null, { timeout: 30000 });
+      searching = true;
+      renderSearchResults(d, q);
+      msg.className = "msg";
+      msg.textContent = "「" + q + "」找到 " + (d.items || []).length + " 项" +
+        (d.truncated ? "，已到上限，缩小目录再试更准" : "");
+    } catch (e) {
+      msg.className = "msg err";
+      msg.textContent = e.message;
     }
   };
 
@@ -1880,7 +2163,7 @@ function renderFilesView(root) {
     el("button", { class: "link", text: "取消选择", onclick: () => { selected.clear(); lastPick = -1; syncSelection(); } }),
   );
 
-  // 工具栏按「新建 / 批量 / 目录」分组，中间用竖线断开：
+  // 工具栏按「上传 / 批量 / 搜索 / 目录」分组，中间用竖线断开：
   // 六个同等权重的按钮排成一排会糊成一条，分组后一眼能找到主操作。
   const toolbar = el("div", { class: "row wrap toolbar" }, [
     el("button", { text: "上传文件", onclick: () => fileInput.click() }),
@@ -1898,9 +2181,21 @@ function renderFilesView(root) {
     } }),
     el("div", { class: "tool-divider" }),
     el("button", { class: "ghost", text: "回收站", onclick: openTrash }),
+    el("div", { class: "tool-divider" }),
+    el("div", { class: "search-box" }, [
+      searchInput,
+      el("button", { class: "ghost", text: "搜索", onclick: runSearch }),
+      exitSearchBtn,
+    ]),
     el("div", { class: "spacer" }),
-    el("button", { class: "ghost", text: "刷新", onclick: refresh }),
+    el("button", { class: "ghost", text: "刷新", onclick: () => { searchInput.value = ""; refresh(); } }),
   ]);
+
+  searchInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); runSearch(); }
+    if (e.key === "Escape") { exitSearch(); }
+  });
+  exitSearchBtn.addEventListener("click", () => exitSearch());
 
   fileInput.addEventListener("change", async () => {
     if (!fileInput.files.length) return;
@@ -1959,145 +2254,240 @@ function renderTerminalView(root) {
     return;
   }
 
-  const host = el("div", { class: "term-host" });
-  const msg = el("div", { class: "msg" });
-  const status = el("span", { class: "badge plain", text: "未连接" });
-  const dimLbl = el("span", { class: "hint mono", text: "—" });
-  const connectBtn = el("button", { text: "连接" });
-  const clearBtn = el("button", { class: "ghost", text: "清屏" });
-  let ws = null;
+  // 双标签：每个标签一套独立的 xterm + WebSocket，切标签只切显示，
+  // 会话不重建——否则跑着 apt 的时候瞄一眼另一个终端，回来命令就断了。
+  // 上限与后端一致（maxTerminalSessions = 2）。
+  const MAX_TABS = 2;
+  const tabsBar = el("div", { class: "term-tabs" });
+  const panes = el("div");
+  const empty = el("div", { class: "hint", style: "padding:26px;text-align:center", text: "还没有会话，点上面的「+ 新建标签」开一个" });
+  const sessions = [];
+  let seq = 0;
+  let activeId = 0;
 
-  const setStatus = (text, cls) => { status.className = "badge " + (cls || "plain"); status.textContent = text; };
-  const send = (s) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data: s })); };
-  const sendResize = (c, r) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "resize", cols: c, rows: r })); };
+  const active = () => sessions.find((s) => s.id === activeId) || null;
 
-  // xterm 负责 ANSI 解析、光标定位、退格/全角宽度与 UTF-8 流式解码，
-  // 不再由前端拼字符串——之前的「光标不跟随、ping 后面出乱码」都是那套做法带来的。
-  const term = new Terminal({
-    cursorBlink: true,
-    cursorStyle: "block",
-    fontSize: 13,
-    fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace',
-    lineHeight: 1.3,
-    scrollback: 5000,
-    convertEol: false,
-    theme: {
-      background: "#0d1117", foreground: "#d1d7e0", cursor: "#7aa2f7", cursorAccent: "#0d1117",
-      selectionBackground: "rgba(122,162,247,.30)",
-      black: "#1b1f27", red: "#f7768e", green: "#9ece6a", yellow: "#e0af68",
-      blue: "#7aa2f7", magenta: "#bb9af7", cyan: "#7dcfff", white: "#c0caf5",
-      brightBlack: "#5a6478", brightRed: "#ff9aae", brightGreen: "#b9f27c", brightYellow: "#ffd68a",
-      brightBlue: "#9ab8ff", brightMagenta: "#d4b0ff", brightCyan: "#a4e4ff", brightWhite: "#ffffff",
-    },
-  });
-  const fit = new FitAddon.FitAddon();
-  term.loadAddon(fit);
-
-  const doFit = () => {
-    try { fit.fit(); } catch (_) { /* 容器还没布局好，下次再算 */ }
-    dimLbl.textContent = term.cols + " × " + term.rows;
+  const syncTabBar = () => {
+    const tabs = sessions.map((s) => {
+      const dot = el("span", { class: "term-dot " + s.dot });
+      const close = el("button", { class: "term-tab-close", text: "×", title: "关闭标签" });
+      close.addEventListener("click", (ev) => { ev.stopPropagation(); closeTab(s.id); });
+      return el("div", {
+        class: "term-tab" + (s.id === activeId ? " active" : ""),
+        title: s.title,
+        onclick: () => activate(s.id),
+      }, [dot, el("span", { class: "term-tab-label", text: s.title }), close]);
+    });
+    if (sessions.length < MAX_TABS) tabs.push(addBtn);
+    tabsBar.replaceChildren.apply(tabsBar, tabs);
+    empty.style.display = sessions.length ? "none" : "";
   };
 
-  const connect = async () => {
-    if (ws) { try { ws.close(); } catch (_) {} ws = null; }
-    msg.className = "msg";
-    msg.textContent = "正在申请终端票据…";
-    setStatus("连接中", "warn");
+  const activate = (id) => {
+    activeId = id;
+    for (const s of sessions) s.pane.classList.toggle("active", s.id === id);
+    syncTabBar();
+    const s = active();
+    if (!s) return;
+    // 刚显示出来的容器才有尺寸，fit 必须等下一帧
+    requestAnimationFrame(() => {
+      try { s.fit.fit(); } catch (_) { /* 还没布局好 */ }
+      s.dim.textContent = s.term.cols + " × " + s.term.rows;
+      if (s.ws && s.ws.readyState === WebSocket.OPEN) {
+        s.ws.send(JSON.stringify({ type: "resize", cols: s.term.cols, rows: s.term.rows }));
+      }
+      s.term.focus();
+    });
+  };
+
+  const setBadge = (s, text, cls, dot) => {
+    s.badgeEl.className = "badge " + (cls || "plain");
+    s.badgeEl.textContent = text;
+    s.dot = dot || "idle";
+    syncTabBar();
+  };
+
+  const send = (s, data) => {
+    if (s.ws && s.ws.readyState === WebSocket.OPEN) s.ws.send(JSON.stringify({ type: "input", data: data }));
+  };
+
+  const connect = async (s) => {
+    if (s.ws) { try { s.ws.close(); } catch (_) { /* 已关闭 */ } s.ws = null; }
+    s.msg.className = "msg";
+    s.msg.textContent = "正在申请终端票据…";
+    setBadge(s, "连接中", "warn", "connecting");
     try {
       const t = await api("POST", "/api/v1/terminal/ticket", {});
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      const url = proto + "://" + location.host + "/api/v1/terminal/ws?ticket=" +
-        encodeURIComponent(t.ticket) + "&cols=" + term.cols + "&rows=" + term.rows;
-      ws = new WebSocket(url);
+      const ws = new WebSocket(proto + "://" + location.host + "/api/v1/terminal/ws?ticket=" +
+        encodeURIComponent(t.ticket) + "&cols=" + s.term.cols + "&rows=" + s.term.rows);
+      s.ws = ws;
       ws.binaryType = "arraybuffer";
       ws.onopen = () => {
-        msg.className = "msg ok";
-        msg.textContent = "已连接";
-        setStatus("已连接", "ok");
-        term.focus();
-        doFit();
-        sendResize(term.cols, term.rows);
+        s.msg.className = "msg ok";
+        s.msg.textContent = "已连接";
+        setBadge(s, "已连接", "ok", "open");
+        try { s.fit.fit(); } catch (_) { /* 忽略 */ }
+        s.term.focus();
+        ws.send(JSON.stringify({ type: "resize", cols: s.term.cols, rows: s.term.rows }));
       };
       ws.onmessage = (ev) => {
         if (typeof ev.data === "string") {
           try {
             const m = JSON.parse(ev.data);
             if (m.type === "exit") {
-              term.write("\r\n\x1b[2m[会话结束]\x1b[0m\r\n");
-              msg.textContent = "会话已结束";
-              setStatus("已结束", "plain");
+              s.term.write("\r\n\x1b[2m[会话结束]\x1b[0m\r\n");
+              s.msg.textContent = "会话已结束";
+              setBadge(s, "已结束", "plain", "idle");
             } else if (m.type === "error") {
-              msg.className = "msg err";
-              msg.textContent = m.data;
-              setStatus("错误", "err");
+              s.msg.className = "msg err";
+              s.msg.textContent = m.data;
+              setBadge(s, "错误", "err", "error");
             }
           } catch (_) {
-            term.write(ev.data);
+            s.term.write(ev.data);
           }
           return;
         }
         // 二进制帧原样交给 xterm：ANSI 序列与多字节字符由它自己处理
-        term.write(new Uint8Array(ev.data));
+        s.term.write(new Uint8Array(ev.data));
       };
       ws.onclose = () => {
-        setStatus("已断开", "plain");
-        if (msg.textContent === "已连接") { msg.className = "msg"; msg.textContent = "连接已断开"; }
+        if (s.dot === "open") {
+          setBadge(s, "已断开", "plain", "idle");
+          s.msg.className = "msg";
+          s.msg.textContent = "连接已断开";
+        }
       };
       ws.onerror = () => {
-        msg.className = "msg err";
-        msg.textContent = "WebSocket 连接失败";
-        setStatus("失败", "err");
+        s.msg.className = "msg err";
+        s.msg.textContent = "连接失败：确认「设置 → 基本设置」已启用 Web 终端，且同时打开的会话不超过 2 个";
+        setBadge(s, "失败", "err", "error");
       };
     } catch (e) {
-      msg.className = "msg err";
-      msg.textContent = e.message;
-      setStatus("未连接", "plain");
+      s.msg.className = "msg err";
+      s.msg.textContent = e.message;
+      setBadge(s, "未连接", "plain", "idle");
     }
   };
 
-  connectBtn.addEventListener("click", connect);
-  clearBtn.addEventListener("click", () => term.clear());
+  const closeTab = (id) => {
+    const idx = sessions.findIndex((s) => s.id === id);
+    if (idx < 0) return;
+    const s = sessions[idx];
+    try { if (s.ws) s.ws.close(); } catch (_) { /* 已关闭 */ }
+    try { if (s.ro) s.ro.disconnect(); } catch (_) { /* 忽略 */ }
+    try { s.term.dispose(); } catch (_) { /* 忽略 */ }
+    s.pane.remove();
+    sessions.splice(idx, 1);
+    if (activeId === id) {
+      const next = sessions[Math.max(0, idx - 1)];
+      activeId = next ? next.id : 0;
+      if (next) activate(next.id);
+      else syncTabBar();
+    } else {
+      syncTabBar();
+    }
+  };
+
+  const createSession = () => {
+    const id = ++seq;
+    const host = el("div", { class: "term-host" });
+    const badgeEl = el("span", { class: "badge plain", text: "未连接" });
+    const dim = el("span", { class: "hint mono", text: "—" });
+    const msg = el("div", { class: "msg" });
+    const clearBtn = el("button", { class: "ghost", text: "清屏" });
+    const reBtn = el("button", { class: "ghost", text: "重连" });
+    const pane = el("div", { class: "term-pane" }, [
+      el("div", { class: "row wrap toolbar" }, [badgeEl, dim, clearBtn, reBtn]),
+      msg,
+      host,
+    ]);
+    panes.appendChild(pane);
+
+    const s = { id, title: "终端 " + id, host, pane, msg, badgeEl, dim, ws: null, dot: "idle", ro: null };
+    sessions.push(s);
+
+    const term = new Terminal({
+      cursorBlink: true,
+      cursorStyle: "block",
+      fontSize: 13,
+      fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace',
+      lineHeight: 1.3,
+      scrollback: 5000,
+      convertEol: false,
+      theme: {
+        background: "#0d1117", foreground: "#d1d7e0", cursor: "#7aa2f7", cursorAccent: "#0d1117",
+        selectionBackground: "rgba(122,162,247,.30)",
+        black: "#1b1f27", red: "#f7768e", green: "#9ece6a", yellow: "#e0af68",
+        blue: "#7aa2f7", magenta: "#bb9af7", cyan: "#7dcfff", white: "#c0caf5",
+        brightBlack: "#5a6478", brightRed: "#ff9aae", brightGreen: "#b9f27c", brightYellow: "#ffd68a",
+        brightBlue: "#9ab8ff", brightMagenta: "#d4b0ff", brightCyan: "#a4e4ff", brightWhite: "#ffffff",
+      },
+    });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    s.term = term;
+    s.fit = fit;
+
+    term.open(host);
+    term.onData((d) => send(s, d));
+    term.onResize(({ cols, rows }) => {
+      dim.textContent = cols + " × " + rows;
+      if (s.ws && s.ws.readyState === WebSocket.OPEN) {
+        s.ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      }
+    });
+    // 选中即复制：剪贴板 API 只在 HTTPS / localhost 下可用，失败就算了
+    term.onSelectionChange(() => {
+      const sel = term.getSelection();
+      if (sel && navigator.clipboard) navigator.clipboard.writeText(sel).catch(() => {});
+    });
+
+    clearBtn.addEventListener("click", () => term.clear());
+    reBtn.addEventListener("click", () => connect(s));
+
+    const ro = new ResizeObserver(() => {
+      if (!pane.classList.contains("active")) return;
+      try { fit.fit(); } catch (_) { /* 忽略 */ }
+    });
+    ro.observe(host);
+    s.ro = ro;
+    return s;
+  };
+
+  const addTab = () => {
+    if (sessions.length >= MAX_TABS) return;
+    const s = createSession();
+    activate(s.id);
+    connect(s);
+  };
+  const addBtn = el("button", { class: "term-tab-add", text: "+ 新建标签", title: "最多同时 2 个会话" });
+  addBtn.addEventListener("click", addTab);
 
   root.replaceChildren(card("Web 终端", [
-    // 一行只放控件，说明文字另起一行：原来五个元素挤在一条线上，
-    // 后半句在 1280 宽度以下一定会被挤成两行，按钮也跟着移位。
-    el("div", { class: "row wrap toolbar" }, [
-      connectBtn,
-      clearBtn,
-      status,
-      dimLbl,
-    ]),
-    el("div", { class: "hint", style: "margin-top:10px", text: "以 root 运行，不需要 sudo（sudo 用的是 setuid 二进制，已被沙箱挡住）；Ctrl+C 中断，Ctrl+Shift+V 粘贴" }),
-    msg,
-    host,
+    el("div", { class: "hint", text: "以 root 运行，不需要 sudo（sudo 用的是 setuid 二进制，已被沙箱挡住）；Ctrl+C 中断，Ctrl+Shift+V 粘贴。会话最长 30 分钟，同时最多 2 个。" }),
+    tabsBar,
+    panes,
+    empty,
     el("div", { class: "actions", style: "justify-content:space-between" }, [
-      el("span", { class: "hint", text: "终端默认关闭，到「设置 → 基本设置」勾选「启用 Web 终端」即可生效，不用重启。会话最长 30 分钟，同时最多 2 个。" }),
+      el("span", { class: "hint", text: "终端默认关闭，到「设置 → 基本设置」勾选「启用 Web 终端」即可生效，不用重启。" }),
       el("button", { class: "ghost", text: "去设置", onclick: () => renderApp("settings") }),
     ]),
   ]));
 
-  term.open(host);
-  requestAnimationFrame(doFit);
-  term.onData(send);
-  term.onResize(({ cols, rows }) => { dimLbl.textContent = cols + " × " + rows; sendResize(cols, rows); });
-  // 选中即复制：剪贴板 API 只在 HTTPS / localhost 下可用，失败就算了，不打断使用
-  term.onSelectionChange(() => {
-    const sel = term.getSelection();
-    if (sel && navigator.clipboard) navigator.clipboard.writeText(sel).catch(() => {});
-  });
-  term.focus();
-
-  const ro = new ResizeObserver(() => { try { fit.fit(); } catch (_) {} });
-  ro.observe(host);
+  syncTabBar();
+  addTab();
 
   state.cleanup = () => {
-    try { if (ws) ws.close(); } catch (_) {}
-    ro.disconnect();
-    try { term.dispose(); } catch (_) {}
+    for (const s of sessions) {
+      try { if (s.ws) s.ws.close(); } catch (_) { /* 忽略 */ }
+      try { if (s.ro) s.ro.disconnect(); } catch (_) { /* 忽略 */ }
+      try { s.term.dispose(); } catch (_) { /* 忽略 */ }
+    }
   };
-
-  setTimeout(connect, 120);
 }
+
 
 // 兜底渲染：vendor 里的 xterm 没加载成功时仍能连着看输出（功能有限）。
 function renderTerminalFallback(root) {
@@ -2179,14 +2569,30 @@ function renderTerminalFallback(root) {
   setTimeout(connect, 100);
 }
 
-// ---------- 防火墙 ----------
+// ---------- 安全 ----------
+//
+// 原来这一页只叫「防火墙」，只有规则和封禁列表。可运维时真正想知道的是
+// 「谁在打我、打的是什么」——这跟「我挡了谁」本来就是同一件事，
+// 所以合并成一页：攻击记录在最上面，规则 / 封禁 / SSH 防护依次往下。
 
-function renderFirewallView(root) {
+const SEC_SOURCE = {
+  ssh: ["SSH 爆破", "warn"],
+  panel: ["面板撞库", "err"],
+  web: ["网站扫描", "muted"],
+};
+
+function renderSecurityView(root) {
   const statusBox = el("div");
   const rulesBox = el("div");
   const bansBox = el("div");
   const sshBox = el("div");
+  const recBox = el("div");
+  const recMsg = el("div", { class: "msg" });
   const msg = el("div", { class: "msg" });
+
+  const winSel = select([
+    ["10", "最近 10 分钟"], ["60", "最近 1 小时"], ["1440", "最近 24 小时"], ["10080", "最近 7 天"],
+  ], "1440");
 
   const load = async () => {
     try {
@@ -2196,8 +2602,8 @@ function renderFirewallView(root) {
         el("div", { class: "grid stat-grid" }, [
           statCard("后端", st.backend === "nft" ? "nftables" : st.backend === "iptables" ? "iptables-legacy" : "不可用",
             st.supported ? "已就绪" : (st.reason || "")),
-          statCard("模式", st.whitelist ? "白名单（默认拒绝）" : "黑名单（默认放行）",
-            st.whitelist ? "仅放行已添加规则" : "未匹配流量放行"),
+          statCard("模式", st.whitelist ? "白名单" : "黑名单",
+            st.whitelist ? "默认拒绝，仅放行已添加规则" : "默认放行，只拦已添加规则"),
           statCard("SSH 端口", (data.ssh_ports || []).join(", "), "始终优先放行"),
           statCard("封禁数", String((st.bans || []).length), "nft set 自动到期"),
         ]),
@@ -2249,7 +2655,7 @@ function renderFirewallView(root) {
         el("td", { class: "mono", text: c.ip }),
         el("td", {}, [badge(String(c.count), c.count >= d.threshold ? "err" : "warn")]),
         el("td", {}, [el("button", { class: "link", text: "封禁 " + d.ban_minutes + " 分钟", onclick: async () => {
-          try { await api("POST", "/api/v1/firewall/bans", { ip: c.ip, minutes: d.ban_minutes }); load(); }
+          try { await api("POST", "/api/v1/firewall/bans", { ip: c.ip, minutes: d.ban_minutes }); load(); loadRecords(); }
           catch (e) { alert(e.message); }
         } })]),
       ]));
@@ -2259,6 +2665,68 @@ function renderFirewallView(root) {
       );
     } catch (e) {
       sshBox.replaceChildren(emptyHint(e.message));
+    }
+  };
+
+  let banMinutesDefault = 60;
+
+  const banIP = async (ip) => {
+    try {
+      await api("POST", "/api/v1/firewall/bans", { ip: ip, minutes: banMinutesDefault });
+      await load();
+      loadRecords();
+    } catch (e) {
+      alert(e.message);
+    }
+  };
+
+  const loadRecords = async () => {
+    recMsg.className = "msg";
+    recMsg.textContent = "读取中…";
+    recBox.replaceChildren(el("div", { class: "hint", text: "汇总日志中…" }));
+    try {
+      const d = await api("GET", "/api/v1/security/records?minutes=" + winSel.value, null, { timeout: 20000 });
+      banMinutesDefault = d.ban_minutes || 60;
+
+      const bits = [];
+      bits.push(d.ssh && d.ssh.supported ? "SSH 失败 " + d.ssh.count + " 次" : "SSH 日志不可用");
+      bits.push(d.panel && d.panel.supported ? "面板登录失败 " + d.panel.count + " 次" : "面板审计不可用");
+      bits.push(d.web && d.web.supported ? "网站扫描探测 " + d.web.count + " 次（" + (d.web.extra || "") + "）" : "网站日志不可用");
+      const reasons = [d.ssh, d.panel, d.web]
+        .filter((x) => x && !x.supported && x.reason)
+        .map((x) => x.reason);
+
+      recMsg.className = "msg";
+      recMsg.textContent = bits.join(" · ");
+
+      const records = d.records || [];
+      const rows = records.map((r) => {
+        const src = SEC_SOURCE[r.source] || [r.source, "muted"];
+        return el("tr", {}, [
+          el("td", {}, [badge(src[0], src[1])]),
+          el("td", { class: "mono sec-ip", text: r.ip }),
+          el("td", {}, [badge(String(r.count), r.count >= 20 ? "err" : "warn")]),
+          el("td", { class: "mono muted", text: r.last || "-" }),
+          el("td", {}, [el("span", { class: "sec-detail", text: r.detail || "", title: r.detail || "" })]),
+          el("td", {}, [r.banned
+            ? badge("已封禁", "plain")
+            : el("button", { class: "link", text: "封禁 " + banMinutesDefault + " 分钟", onclick: () => banIP(r.ip) })]),
+        ]);
+      });
+
+      recBox.replaceChildren.apply(recBox, [
+        rows.length ? el("table", { class: "data sec-table" }, [
+          el("thead", {}, [el("tr", {}, ["来源", "IP", "次数", "最近一次", "详情", "操作"].map((h) => el("th", { text: h })))]),
+          el("tbody", {}, rows),
+        ]) : emptyHint("这段时间内没有扫描或爆破记录"),
+        reasons.length ? el("div", { class: "hint", style: "margin-top:10px", text: "部分数据源不可用：" + reasons.join("；") }) : null,
+        el("div", { class: "hint", style: "margin-top:10px", text:
+          "SSH 超过 " + (d.threshold || 5) + " 次失败会自动封禁 " + (d.ban_minutes || 60) + " 分钟；扫描探测只做记录，不会自动封（误封正常爬虫的代价更高）。" }),
+      ].filter(Boolean));
+    } catch (e) {
+      recMsg.className = "msg err";
+      recMsg.textContent = e.message;
+      recBox.replaceChildren();
     }
   };
 
@@ -2301,25 +2769,41 @@ function renderFirewallView(root) {
     }
   } });
 
+  winSel.addEventListener("change", loadRecords);
+
+  const manualBan = (() => {
+    const ip = el("input", { placeholder: "IP 地址", style: "max-width:200px" });
+    const minutes = el("input", { placeholder: "分钟", value: "60", style: "max-width:100px" });
+    const btn = el("button", { text: "封禁", onclick: async () => {
+      try {
+        await api("POST", "/api/v1/firewall/bans", { ip: ip.value.trim(), minutes: parseInt(minutes.value, 10) || 60 });
+        ip.value = "";
+        load();
+        loadRecords();
+      } catch (e) { alert(e.message); }
+    } });
+    return el("div", { class: "row wrap" }, [ip, minutes, btn]);
+  })();
+
   root.replaceChildren(
-    card("防火墙", [msg, statusBox, el("div", { class: "actions" }, [applyBtn])]),
-    card("规则", [addForm, rulesBox]),
-    card("手动封禁", [
-      (() => {
-        const ip = el("input", { placeholder: "IP 地址", style: "max-width:200px" });
-        const minutes = el("input", { placeholder: "分钟", value: "60", style: "max-width:100px" });
-        const btn = el("button", { text: "封禁", onclick: async () => {
-          try { await api("POST", "/api/v1/firewall/bans", { ip: ip.value.trim(), minutes: parseInt(minutes.value, 10) || 60 }); ip.value = ""; load(); }
-          catch (e) { alert(e.message); }
-        } });
-        return el("div", { class: "row wrap" }, [ip, minutes, btn]);
-      })(),
-      bansBox,
+    card("安全概览", [msg, statusBox, el("div", { class: "actions" }, [applyBtn])]),
+    el("div", { class: "card section" }, [
+      el("div", { class: "card-head" }, [
+        el("div", {}, [el("h2", { text: "外网攻击记录" })]),
+        el("div", { class: "row" }, [winSel, el("button", { class: "ghost", text: "刷新", onclick: loadRecords })]),
+      ]),
+      el("p", { class: "sub", text: "三个入口合在一起看：SSH 爆破来自 journald，面板撞库来自审计日志，网站扫描来自 Nginx / Apache 的访问日志。" }),
+      recMsg,
+      recBox,
     ]),
+    card("防火墙规则", [addForm, rulesBox]),
+    card("封禁管理", [manualBan, bansBox]),
     card("SSH 爆破防护", [sshBox]),
   );
+
   load();
   loadSSH();
+  loadRecords();
 }
 
 // ---------- 日志 ----------

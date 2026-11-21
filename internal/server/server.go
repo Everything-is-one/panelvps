@@ -72,6 +72,7 @@ type Server struct {
 	notifier *notify.Notifier
 	jobs     *jobs.Manager
 	relays   *relay.Manager
+	disk     *metrics.DiskScanner
 
 	termMu     sync.Mutex
 	termTicket map[string]time.Time
@@ -175,6 +176,7 @@ func New(cfg *config.Config, st *store.Store, logger *slog.Logger) (*Server, err
 	}
 	s.jobs = jobs.New(60, 2)
 	s.termTicket = map[string]time.Time{}
+	s.disk = metrics.NewDiskScanner()
 
 	// 中转规则随面板启动恢复。转发引擎不依赖 Xray，也不依赖任何外部
 	// 程序，所以这里可以同步启动：失败只影响对应规则，不会拖住面板。
@@ -230,6 +232,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/system/jobs", s.requireAuth(s.handleJobs))
 	s.mux.HandleFunc("GET /api/v1/system/jobs/{id}", s.requireAuth(s.handleJob))
 	s.mux.HandleFunc("GET /api/v1/audit", s.requireAuth(s.handleAuditList))
+	// 磁盘占用分析：异步扫描 + 轮询，避免几十万文件的遍历把请求挂死
+	s.mux.HandleFunc("GET /api/v1/system/disk-usage", s.requireAuth(s.handleDiskUsage))
 
 	// 控制台：访问方式、账号、BBR、重启
 	s.mux.HandleFunc("GET /api/v1/control", s.requireAuth(s.handleControlStatus))
@@ -242,6 +246,7 @@ func (s *Server) routes() {
 	// 文件
 	s.mux.HandleFunc("GET /api/v1/files", s.requireAuth(s.handleFileList))
 	s.mux.HandleFunc("GET /api/v1/files/stat", s.requireAuth(s.handleFileStat))
+	s.mux.HandleFunc("GET /api/v1/files/search", s.requireAuth(s.handleFileSearch))
 	s.mux.HandleFunc("GET /api/v1/files/content", s.requireAuth(s.handleFileRead))
 	s.mux.HandleFunc("PUT /api/v1/files/content", s.requireAuth(s.handleFileWrite))
 	s.mux.HandleFunc("GET /api/v1/files/download", s.requireAuth(s.handleFileDownload))
@@ -269,6 +274,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/firewall/bans", s.requireAuth(s.handleBanCreate))
 	s.mux.HandleFunc("DELETE /api/v1/firewall/bans/{ip}", s.requireAuth(s.handleBanDelete))
 	s.mux.HandleFunc("GET /api/v1/security/ssh", s.requireAuth(s.handleSSHReport))
+	s.mux.HandleFunc("GET /api/v1/security/records", s.requireAuth(s.handleSecurityRecords))
 
 	// 日志
 	s.mux.HandleFunc("GET /api/v1/logs/sources", s.requireAuth(s.handleLogSources))

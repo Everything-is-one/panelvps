@@ -35,6 +35,62 @@ func TestCgroupMemV2(t *testing.T) {
 	}
 }
 
+// 容器里 memory.current 含 page cache：可回收的那部分必须从「已用」里
+// 扣掉，否则升级面板写一次二进制，概览上的内存就凭空涨几十 MB。
+func TestCgroupMemV2ExcludesFileCache(t *testing.T) {
+	withCgroup(t, map[string]string{
+		"memory.max":     "536870912\n",
+		"memory.current": "134217728\n",
+		"memory.stat":    "anon 41943040\nfile 92274688\ninactive_file 92274688\nactive_file 0\n",
+	})
+	limit, used, cache := cgroupMemDetail()
+	if limit != 536870912 {
+		t.Fatalf("限额解析错误: %d", limit)
+	}
+	if cache != 92274688 {
+		t.Fatalf("缓存应为 92274688, 实际 %d", cache)
+	}
+	if used != 134217728-92274688 {
+		t.Fatalf("已用应为 current-file=%d, 实际 %d", 134217728-92274688, used)
+	}
+}
+
+// 现场数据：机器不紧张，内核把缓存全留在 active 链，inactive_file 是 0。
+// 按 docker stats 的口径（current - inactive_file）一分缓存都扣不掉，
+// 卡片照旧显示 129.7 MB —— 这条就是防这个回归的。
+func TestCgroupMemV2CacheAllActive(t *testing.T) {
+	withCgroup(t, map[string]string{
+		"memory.max":     "2147483648\n",
+		"memory.current": "135979008\n",
+		"memory.stat": "anon 43606016\nfile 85401600\ninactive_file 0\n" +
+			"active_file 71368704\nslab 3316808\nshmem 0\n",
+	})
+	_, used, cache := cgroupMemDetail()
+	if cache != 85401600 {
+		t.Fatalf("缓存应为 file=85401600, 实际 %d", cache)
+	}
+	if want := uint64(135979008 - 85401600); used != want {
+		t.Fatalf("已用应为 %d（约 48.2 MB）, 实际 %d", want, used)
+	}
+}
+
+// tmpfs 没有 swap 收不回来，不能算进「可回收缓存」，否则容器里挂一块
+// tmpfs 就会把已用伪装成很小，真 OOM 时措手不及。
+func TestCgroupMemV2ShmemStaysUsed(t *testing.T) {
+	withCgroup(t, map[string]string{
+		"memory.max":     "536870912\n",
+		"memory.current": "104857600\n",
+		"memory.stat":    "file 10485760\nshmem 4194304\ninactive_file 0\n",
+	})
+	_, used, cache := cgroupMemDetail()
+	if cache != 10485760-4194304 {
+		t.Fatalf("缓存应扣掉 shmem 后为 %d, 实际 %d", 10485760-4194304, cache)
+	}
+	if want := uint64(104857600 - (10485760 - 4194304)); used != want {
+		t.Fatalf("已用应为 %d, 实际 %d", want, used)
+	}
+}
+
 func TestCgroupMemV2Unlimited(t *testing.T) {
 	withCgroup(t, map[string]string{
 		"memory.max":     "max\n",

@@ -81,6 +81,26 @@ func (s *Server) handleSystemTop(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleDiskUsage 是磁盘占用分析的入口。
+//
+// 一次扫描可能要遍历几十万个文件，远超一个 HTTP 请求该等的时间，
+// 所以这里只做两件事：没有缓存就开始扫（立刻返回 running），
+// 有缓存就返回结果。前端拿 running 时按 700ms 轮询同一地址。
+func (s *Server) handleDiskUsage(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	refresh := r.URL.Query().Get("refresh") == "1"
+	if s.disk == nil {
+		fail(w, http.StatusServiceUnavailable, codeInternalError, "磁盘分析不可用")
+		return
+	}
+	st, err := s.disk.Start(path, refresh)
+	if err != nil {
+		fail(w, http.StatusBadRequest, codeBadRequest, err.Error())
+		return
+	}
+	ok(w, st)
+}
+
 func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 	items, err := sysinfo.Services()
 	if err != nil {

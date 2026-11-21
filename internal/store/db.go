@@ -395,6 +395,56 @@ func (s *Store) AuditCount(ctx context.Context) (int, error) {
 	return n, err
 }
 
+// PanelAttack 是面板自身的登录失败聚合。
+type PanelAttack struct {
+	IP       string
+	Failed   int
+	Blocked  int
+	LastUnix int64
+}
+
+// SecurityLogins 汇总窗口内针对面板的撞库尝试。
+// 数据来自审计表：每次登录失败都会写一条 login_failed，
+// 连续失败触发限流时再补一条 login_blocked。
+func (s *Store) SecurityLogins(ctx context.Context, since time.Time) ([]PanelAttack, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT ip, action, COUNT(*), MAX(created_at)
+		  FROM audit_logs
+		 WHERE created_at >= ? AND action IN ('login_failed','login_blocked')
+		 GROUP BY ip, action`, since.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	m := map[string]*PanelAttack{}
+	for rows.Next() {
+		var ip, action string
+		var n, last int64
+		if err := rows.Scan(&ip, &action, &n, &last); err != nil {
+			continue
+		}
+		a := m[ip]
+		if a == nil {
+			a = &PanelAttack{IP: ip}
+			m[ip] = a
+		}
+		if action == "login_blocked" {
+			a.Blocked += int(n)
+		} else {
+			a.Failed += int(n)
+		}
+		if last > a.LastUnix {
+			a.LastUnix = last
+		}
+	}
+	out := make([]PanelAttack, 0, len(m))
+	for _, a := range m {
+		out = append(out, *a)
+	}
+	return out, rows.Err()
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1
