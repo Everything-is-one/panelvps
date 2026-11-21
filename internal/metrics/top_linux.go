@@ -28,6 +28,11 @@ const (
 	topCacheTTL  = 2 * time.Second
 )
 
+// clockTicks 是 /proc/<pid>/stat 里 utime/stime 的单位：Linux 的 USER_HZ。
+// 这是内核 ABI 的一部分，所有架构都固定为 100，与 CPU 频率无关。
+// 用常量而不是 sysconf(_SC_CLK_TCK)，避免为此引入 cgo。
+const clockTicks = 100
+
 type procSample struct {
 	pid   int
 	name  string
