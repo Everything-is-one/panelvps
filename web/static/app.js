@@ -434,7 +434,7 @@ function renderProxyView(root) {
     ]),
     el("div", { class: "card section" }, [
       el("h2", { text: "分享链接地址" }),
-      el("p", { class: "sub", text: "客户端连接用的公网地址。默认取当前访问域名，VPS 上建议填真实 IP 或域名。" }),
+      el("p", { class: "sub", text: "客户端连接用的公网地址。默认取当前访问域名，VPS 上建议填真实 IP 或域名。NAT / 端口映射的机器可以连端口一起填，例如 1.2.3.4:30986。" }),
       el("div", { class: "row wrap" }, [
         hostInput,
         el("button", { class: "ghost", text: "保存", onclick: async () => {
@@ -558,7 +558,15 @@ function inboundCard(ib, data, pageRoot) {
           badge(meta, "plain"),
           ib.enabled ? null : badge("已停用", "warn"),
         ]),
-        el("div", { class: "mono muted", text: ":" + ib.port + "  " + detail + "  流量 ↑" + fmtBytes(ib.up) + " ↓" + fmtBytes(ib.down) }),
+        el("div", {
+          class: "mono muted",
+          text: (() => {
+            // 入站自己的对外端口优先，其次是设置里的全局端口
+            const pub = ib.public_port > 0 ? ib.public_port : (data.public_port || 0);
+            return (pub > 0 ? ":" + ib.port + " → 公网 " + pub : ":" + ib.port)
+              + "  " + detail + "  流量 ↑" + fmtBytes(ib.up) + " ↓" + fmtBytes(ib.down);
+          })(),
+        }),
       ]),
       el("div", { class: "row" }, [
         el("button", { class: "ghost", text: "复制链接", onclick: (ev) => copyInboundLink(ib, ev.target) }),
@@ -609,7 +617,7 @@ async function copyInboundLink(ib, btn) {
     return;
   }
   if (!c.link) {
-    alert("还没填服务器公网地址，无法生成链接。请在上方「公网地址」里填 IP 或域名后保存。");
+    alert("还没填服务器公网地址，无法生成链接。请在上方「公网地址」里填 IP 或域名后保存；NAT 机器要写 IP:对外端口。");
     return;
   }
   copyWithFeedback(btn, c.link, "已复制连接");
@@ -695,6 +703,10 @@ function inboundForm(root) {
     class: "ghost", text: "随机", style: "flex:0 0 auto",
     onclick: () => { port.value = String(randomPort()); },
   });
+  const publicPort = el("input", {
+    value: "", type: "number", min: "1", max: "65535",
+    placeholder: "留空 = 与监听端口相同",
+  });
   const remark = el("input", { placeholder: "例如：东京节点" });
   const dest = el("input", { value: "www.cloudflare.com:443", placeholder: "REALITY 伪装目标 host:port" });
   const sni = el("input", { value: "www.cloudflare.com", placeholder: "serverNames，多个用逗号分隔" });
@@ -757,6 +769,7 @@ function inboundForm(root) {
         protocol: protocol.value,
         listen: listen.value.trim(),
         port: parseInt(port.value, 10),
+        public_port: parseInt(publicPort.value, 10) || 0,
         network: network.value,
         security: security.value,
         options,
@@ -784,6 +797,8 @@ function inboundForm(root) {
       field("监听地址", listen, "0.0.0.0 = IPv4 + IPv6 同时监听"),
       field("端口", el("div", { class: "row", style: "gap:6px" }, [port, portRoll]), "默认随机，被占用会提示换一个"),
     ]),
+    field("对外端口", publicPort,
+      "NAT / 端口映射的机器才需要：商家把公网 30986 转发到容器内 47736 时填 30986，分享链接才会写公网端口。独立 IP 直接留空。"),
     field("传输方式", network, "REALITY 选 tcp 或 grpc；ws 一般配合 CDN"),
     wsBox,
     field("安全类型", security, "reality 不需要证书，也最省事"),
@@ -2192,7 +2207,7 @@ function renderSettingsView(root) {
     ]),
     card("账号", [accountBox]),
     card("基本设置", [
-      field("公网地址", host, "用于生成分享链接；可填 IP 或域名"),
+      field("公网地址", host, "用于生成分享链接；可填 IP、域名，NAT 机器可写 IP:端口"),
       field("告警 Webhook", webhook, "留空则关闭。事件以 JSON POST 推送，5 分钟内相同标题只发一次"),
       el("label", { class: "row" }, [guard, el("span", { text: "启用 SSH 爆破自动封禁" })]),
       field("失败次数阈值", threshold, "窗口 10 分钟（配置项 ssh_guard_window）"),

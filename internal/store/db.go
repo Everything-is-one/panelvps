@@ -163,7 +163,13 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, opsSchema); err != nil {
 		return fmt.Errorf("初始化运维表结构失败: %w", err)
 	}
-	for _, v := range []int{1, 2, 3} {
+	// v4：入站的对外端口。NAT / 端口映射的机器上，容器内监听端口与
+	// 商家映射出来的公网端口不同，分享链接必须写对外那个。
+	if err := s.addColumnIfMissing(ctx, "inbounds", "public_port",
+		"public_port INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("补 inbounds.public_port 失败: %w", err)
+	}
+	for _, v := range []int{1, 2, 3, 4} {
 		if _, err := s.db.ExecContext(ctx,
 			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(?, ?)`,
 			v, time.Now().Unix()); err != nil {
@@ -171,6 +177,39 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// addColumnIfMissing 补列。SQLite 的 ALTER TABLE 没有 IF NOT EXISTS，
+// 直接执行在老库上会报 duplicate column，所以先查 PRAGMA 再决定。
+func (s *Store) addColumnIfMissing(ctx context.Context, table, column, ddl string) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	found := false
+	for rows.Next() {
+		var (
+			cid, notnull, pk int
+			name, ctype      string
+			dflt             any
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+ddl)
+	return err
 }
 
 // ---------- users ----------

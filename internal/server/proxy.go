@@ -51,19 +51,20 @@ type clientView struct {
 }
 
 type inboundView struct {
-	ID       int64        `json:"id"`
-	Tag      string       `json:"tag"`
-	Remark   string       `json:"remark"`
-	Protocol string       `json:"protocol"`
-	Listen   string       `json:"listen"`
-	Port     int          `json:"port"`
-	Network  string       `json:"network"`
-	Security string       `json:"security"`
-	Options  xray.Options `json:"options"`
-	Enabled  bool         `json:"enabled"`
-	Clients  []clientView `json:"clients"`
-	Up       int64        `json:"up"`
-	Down     int64        `json:"down"`
+	ID         int64        `json:"id"`
+	Tag        string       `json:"tag"`
+	Remark     string       `json:"remark"`
+	Protocol   string       `json:"protocol"`
+	Listen     string       `json:"listen"`
+	Port       int          `json:"port"`
+	PublicPort int          `json:"public_port"`
+	Network    string       `json:"network"`
+	Security   string       `json:"security"`
+	Options    xray.Options `json:"options"`
+	Enabled    bool         `json:"enabled"`
+	Clients    []clientView `json:"clients"`
+	Up         int64        `json:"up"`
+	Down       int64        `json:"down"`
 }
 
 // handleProxiesOverview 一次性返回页面需要的全部数据，避免前端多次往返。
@@ -86,7 +87,7 @@ func (s *Server) handleProxiesOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	host := s.publicHost(r)
+	host, globalPort := s.publicTarget(r)
 	now := time.Now()
 	views := make([]inboundView, 0, len(inbounds))
 	for _, in := range inbounds {
@@ -96,7 +97,7 @@ func (s *Server) handleProxiesOverview(w http.ResponseWriter, r *http.Request) {
 
 		v := inboundView{
 			ID: in.ID, Tag: in.Tag, Remark: in.Remark, Protocol: in.Protocol,
-			Listen: in.Listen, Port: in.Port, Network: in.Network,
+			Listen: in.Listen, Port: in.Port, PublicPort: in.PublicPort, Network: in.Network,
 			Security: in.Security, Options: opts, Enabled: in.Enabled,
 			Clients: []clientView{},
 		}
@@ -112,7 +113,8 @@ func (s *Server) handleProxiesOverview(w http.ResponseWriter, r *http.Request) {
 				cv.ExpiresAt = &t
 			}
 			if host != "" {
-				if link, err := xray.BuildLink(in, c, xray.LinkTarget{Host: host}); err == nil {
+				target := xray.LinkTarget{Host: host, Port: linkPort(in, globalPort)}
+				if link, err := xray.BuildLink(in, c, target); err == nil {
 					cv.Link = link
 				}
 			}
@@ -124,12 +126,13 @@ func (s *Server) handleProxiesOverview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ok(w, map[string]any{
-		"status":     s.xr.Status(),
-		"host":       host,
-		"inbounds":   views,
-		"protocols":  []string{"vless", "vmess", "trojan", "shadowsocks"},
-		"networks":   []string{"tcp", "ws", "grpc"},
-		"securities": []string{"none", "tls", "reality"},
+		"status":      s.xr.Status(),
+		"host":        host,
+		"public_port": globalPort,
+		"inbounds":    views,
+		"protocols":   []string{"vless", "vmess", "trojan", "shadowsocks"},
+		"networks":    []string{"tcp", "ws", "grpc"},
+		"securities":  []string{"none", "tls", "reality"},
 		"ss_methods": []string{
 			"2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm",
 			"2022-blake3-chacha20-poly1305",
@@ -144,14 +147,16 @@ func (s *Server) handleProxiesOverview(w http.ResponseWriter, r *http.Request) {
 // ---------- 入站 ----------
 
 type inboundReq struct {
-	Remark   string       `json:"remark"`
-	Protocol string       `json:"protocol"`
-	Listen   string       `json:"listen"`
-	Port     int          `json:"port"`
-	Network  string       `json:"network"`
-	Security string       `json:"security"`
-	Options  xray.Options `json:"options"`
-	Enabled  *bool        `json:"enabled"`
+	Remark   string `json:"remark"`
+	Protocol string `json:"protocol"`
+	Listen   string `json:"listen"`
+	Port     int    `json:"port"`
+	// PublicPort 是 NAT 映射出来的对外端口，0 表示与监听端口相同。
+	PublicPort int          `json:"public_port"`
+	Network    string       `json:"network"`
+	Security   string       `json:"security"`
+	Options    xray.Options `json:"options"`
+	Enabled    *bool        `json:"enabled"`
 }
 
 func (s *Server) handleCreateInbound(w http.ResponseWriter, r *http.Request) {
@@ -323,6 +328,14 @@ func (s *Server) buildInbound(ctx context.Context, req inboundReq, prev *store.I
 			return nil, err
 		}
 		in.Port = p
+	}
+	if req.PublicPort != 0 {
+		if req.PublicPort < 1 || req.PublicPort > 65535 {
+			return nil, errors.New("对外端口必须在 1–65535 之间（留空表示与监听端口相同）")
+		}
+		in.PublicPort = req.PublicPort
+	} else if prev == nil {
+		in.PublicPort = 0
 	}
 	if in.Port < 1 || in.Port > 65535 {
 		return nil, errors.New("端口必须在 1–65535 之间")
@@ -746,12 +759,12 @@ func (s *Server) handleClientLinks(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, codeNotFound, "入站不存在")
 		return
 	}
-	host := s.publicHost(r)
+	host, globalPort := s.publicTarget(r)
 	if host == "" {
 		fail(w, http.StatusBadRequest, codeBadRequest, "请先在设置里填写服务器公网地址")
 		return
 	}
-	link, err := xray.BuildLink(*in, *c, xray.LinkTarget{Host: host})
+	link, err := xray.BuildLink(*in, *c, xray.LinkTarget{Host: host, Port: linkPort(*in, globalPort)})
 	if err != nil {
 		fail(w, http.StatusBadRequest, codeBadRequest, err.Error())
 		return
@@ -776,7 +789,8 @@ func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, codeNotFound, "入站不存在")
 		return
 	}
-	link, err := xray.BuildLink(*in, *c, xray.LinkTarget{Host: s.publicHost(r)})
+	h, gp := s.publicTarget(r)
+	link, err := xray.BuildLink(*in, *c, xray.LinkTarget{Host: h, Port: linkPort(*in, gp)})
 	if err != nil {
 		fail(w, http.StatusBadRequest, codeBadRequest, err.Error())
 		return
@@ -982,22 +996,65 @@ func (s *Server) CollectTraffic(ctx context.Context) error {
 	return nil
 }
 
-// publicHost 决定分享链接里的地址：设置项 → 配置 → 请求 Host。
-func (s *Server) publicHost(r *http.Request) string {
+// publicTarget 返回分享链接该指向的地址。
+//
+// 设置里允许填 "IP:端口"——NAT / 端口映射的机器上，容器内监听 47736，
+// 商家把公网 30986 转到 47736，链接必须写 30986。这里把端口拆出来，
+// 否则 joinHostPort 会拼成 "204.197.163.238:30986:47736"（IPv6 形态还
+// 会被加上方括号），链接直接坏掉。
+//
+// 返回的 port 为 0 表示「没有全局端口覆盖」，由入站自己的 public_port
+// 或监听端口决定。
+func (s *Server) publicTarget(r *http.Request) (string, int) {
+	raw := ""
 	if v, err := s.st.GetSetting(r.Context(), "public_host"); err == nil && v != "" {
-		return v
+		raw = v
+	} else if s.cfg.PublicHost != "" {
+		raw = s.cfg.PublicHost
+	} else {
+		raw = r.Header.Get("X-Forwarded-Host")
+		if raw == "" {
+			raw = r.Host
+		}
 	}
-	if s.cfg.PublicHost != "" {
-		return s.cfg.PublicHost
+	raw = strings.TrimSpace(raw)
+	host, port := splitPublicHost(raw)
+	return host, port
+}
+
+// splitPublicHost 把用户填的「地址」统一成 (主机, 端口)。
+//
+// 容忍这几种写法：203.0.113.9 / 203.0.113.9:30986 / http://203.0.113.9:30986/ /
+// node.example.com / [2001:db8::1]:30986。返回值 port=0 表示没写端口。
+func splitPublicHost(raw string) (string, int) {
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimPrefix(strings.TrimPrefix(raw, "http://"), "https://")
+	raw = strings.TrimSuffix(raw, "/")
+	if h, p, err := net.SplitHostPort(raw); err == nil {
+		if n, _ := strconv.Atoi(p); n > 0 && n < 65536 {
+			return h, n
+		}
+		// 端口写错的（0、99999）当作没写，别把整条链接弄坏
+		return h, 0
 	}
-	host := r.Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = r.Host
+	return raw, 0
+}
+
+// linkPort 决定某个入站的链接端口：入站对外端口 > 全局端口 > 监听端口。
+func linkPort(in store.Inbound, globalPort int) int {
+	if in.PublicPort > 0 {
+		return in.PublicPort
 	}
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		return h
+	if globalPort > 0 {
+		return globalPort
 	}
-	return host
+	return 0
+}
+
+// publicHost 只返回主机名，给「访问方式」这类展示用。
+func (s *Server) publicHost(r *http.Request) string {
+	h, _ := s.publicTarget(r)
+	return h
 }
 
 func (s *Server) audit(r *http.Request, action, target, detail string) {

@@ -67,13 +67,27 @@ func catalog(dataDir string) []struct {
 		}
 	}
 
+	// Xray 同理：面板 fork 的是 `xray run` 子进程，不是 systemd 单元，
+	// journalctl -u xray 在托管模式下永远为空。有我们写的文件就优先读文件。
+	xraySrc := Source{Key: "xray", Label: "Xray 内核", Kind: "journal", Detail: "journalctl -u xray"}
+	var xrayFile string
+	var xrayUnit = []string{"xray"}
+	if logPath := filepath.Join(dataDir, "xray.log"); dataDir != "" {
+		if st, err := os.Stat(logPath); err == nil && !st.IsDir() {
+			xraySrc.Kind = "file"
+			xraySrc.Detail = logPath
+			xrayFile = logPath
+			xrayUnit = nil
+		}
+	}
+
 	return []struct {
 		src  Source
 		file string
 		unit []string
 	}{
 		{panelSrc, panelFile, panelUnit},
-		{Source{Key: "xray", Label: "Xray 内核", Kind: "journal", Detail: "journalctl -u xray"}, "", []string{"xray"}},
+		{xraySrc, xrayFile, xrayUnit},
 		{Source{Key: "auth", Label: "SSH 登录", Kind: "journal", Detail: "journalctl -u ssh"}, "", []string{"ssh", "sshd"}},
 		{Source{Key: "nginx-access", Label: "Nginx 访问", Kind: "file", Detail: "/var/log/nginx/access.log"},
 			"/var/log/nginx/access.log", nil},

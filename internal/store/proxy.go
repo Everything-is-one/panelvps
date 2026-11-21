@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS inbounds (
     protocol   TEXT    NOT NULL,
     listen     TEXT    NOT NULL DEFAULT '0.0.0.0',
     port       INTEGER NOT NULL,
+    public_port INTEGER NOT NULL DEFAULT 0,
     network    TEXT    NOT NULL DEFAULT 'tcp',
     security   TEXT    NOT NULL DEFAULT 'none',
     options    TEXT    NOT NULL DEFAULT '{}',
@@ -63,18 +64,22 @@ CREATE INDEX IF NOT EXISTS idx_samples_client ON traffic_samples(client_id, samp
 
 // Inbound 是一条入站配置。
 type Inbound struct {
-	ID        int64
-	Tag       string
-	Remark    string
-	Protocol  string // vless | vmess | trojan | shadowsocks
-	Listen    string
-	Port      int
-	Network   string // tcp | ws | grpc
-	Security  string // none | tls | reality
-	Options   string // JSON，协议相关参数
-	Enabled   bool
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID       int64
+	Tag      string
+	Remark   string
+	Protocol string // vless | vmess | trojan | shadowsocks
+	Listen   string
+	Port     int
+	// PublicPort 是对外端口。NAT / 端口映射的机器上，容器内监听 47736、
+	// 商家把公网 30986 转发进来，分享链接必须写 30986，否则客户端连不上。
+	// 0 表示「与 Port 相同」，非 NAT 环境不用管。
+	PublicPort int
+	Network    string // tcp | ws | grpc
+	Security   string // none | tls | reality
+	Options    string // JSON，协议相关参数
+	Enabled    bool
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // Client 是一个入站下的用户。
@@ -113,7 +118,7 @@ func (c *Client) Active(now time.Time) bool {
 // ListInbounds 返回全部入站，按端口升序。
 func (s *Store) ListInbounds(ctx context.Context) ([]Inbound, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, tag, remark, protocol, listen, port, network, security, options,
+		`SELECT id, tag, remark, protocol, listen, port, public_port, network, security, options,
 		        enabled, created_at, updated_at
 		   FROM inbounds ORDER BY port`)
 	if err != nil {
@@ -127,7 +132,7 @@ func (s *Store) ListInbounds(ctx context.Context) ([]Inbound, error) {
 		var enabled int
 		var created, updated int64
 		if err := rows.Scan(&in.ID, &in.Tag, &in.Remark, &in.Protocol, &in.Listen, &in.Port,
-			&in.Network, &in.Security, &in.Options, &enabled, &created, &updated); err != nil {
+			&in.PublicPort, &in.Network, &in.Security, &in.Options, &enabled, &created, &updated); err != nil {
 			return nil, err
 		}
 		in.Enabled = enabled == 1
@@ -141,7 +146,7 @@ func (s *Store) ListInbounds(ctx context.Context) ([]Inbound, error) {
 // InboundByID 按主键查询。
 func (s *Store) InboundByID(ctx context.Context, id int64) (*Inbound, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, tag, remark, protocol, listen, port, network, security, options,
+		`SELECT id, tag, remark, protocol, listen, port, public_port, network, security, options,
 		        enabled, created_at, updated_at
 		   FROM inbounds WHERE id = ?`, id)
 	return scanInbound(row)
@@ -150,7 +155,7 @@ func (s *Store) InboundByID(ctx context.Context, id int64) (*Inbound, error) {
 // InboundByPort 用于端口冲突检查。
 func (s *Store) InboundByPort(ctx context.Context, listen string, port int, excludeID int64) (*Inbound, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, tag, remark, protocol, listen, port, network, security, options,
+		`SELECT id, tag, remark, protocol, listen, port, public_port, network, security, options,
 		        enabled, created_at, updated_at
 		   FROM inbounds WHERE port = ? AND listen = ? AND id <> ?`, port, listen, excludeID)
 	return scanInbound(row)
@@ -161,7 +166,7 @@ func scanInbound(r rowScanner) (*Inbound, error) {
 	var enabled int
 	var created, updated int64
 	err := r.Scan(&in.ID, &in.Tag, &in.Remark, &in.Protocol, &in.Listen, &in.Port,
-		&in.Network, &in.Security, &in.Options, &enabled, &created, &updated)
+		&in.PublicPort, &in.Network, &in.Security, &in.Options, &enabled, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -178,10 +183,11 @@ func scanInbound(r rowScanner) (*Inbound, error) {
 func (s *Store) CreateInbound(ctx context.Context, in *Inbound) (int64, error) {
 	now := time.Now().Unix()
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO inbounds(tag, remark, protocol, listen, port, network, security, options,
-		                      enabled, created_at, updated_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		in.Tag, in.Remark, in.Protocol, in.Listen, in.Port, in.Network, in.Security, in.Options,
+		`INSERT INTO inbounds(tag, remark, protocol, listen, port, public_port, network, security,
+		                      options, enabled, created_at, updated_at)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		in.Tag, in.Remark, in.Protocol, in.Listen, in.Port, in.PublicPort,
+		in.Network, in.Security, in.Options,
 		boolToInt(in.Enabled), now, now)
 	if err != nil {
 		return 0, err
@@ -192,10 +198,10 @@ func (s *Store) CreateInbound(ctx context.Context, in *Inbound) (int64, error) {
 // UpdateInbound 覆盖式更新。
 func (s *Store) UpdateInbound(ctx context.Context, in *Inbound) error {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE inbounds SET tag=?, remark=?, protocol=?, listen=?, port=?, network=?,
-		        security=?, options=?, enabled=?, updated_at=?
+		`UPDATE inbounds SET tag=?, remark=?, protocol=?, listen=?, port=?, public_port=?,
+		        network=?, security=?, options=?, enabled=?, updated_at=?
 		  WHERE id=?`,
-		in.Tag, in.Remark, in.Protocol, in.Listen, in.Port, in.Network,
+		in.Tag, in.Remark, in.Protocol, in.Listen, in.Port, in.PublicPort, in.Network,
 		in.Security, in.Options, boolToInt(in.Enabled), time.Now().Unix(), in.ID)
 	if err != nil {
 		return err

@@ -113,7 +113,10 @@ func New(cfg *config.Config, st *store.Store, logger *slog.Logger) (*Server, err
 	if detectErr != nil {
 		logger.Warn("未探测到 Xray，代理功能不可用", "err", detectErr)
 	}
-	s.xr = xray.NewManager(bin, cfg.XrayConfDir, cfg.XrayAPIPort, "warning", logger)
+	// 日志同时落盘：面板托管的是 `xray run` 子进程，journald 里没有它，
+	// 日志页的「Xray 内核」源只能读我们自己写的那份。
+	s.xr = xray.NewManager(bin, cfg.XrayConfDir, cfg.XrayAPIPort, "warning",
+		filepath.Join(cfg.DataDir, "xray.log"), logger)
 
 	// 运维模块：任何一个初始化失败都只降级对应功能，不阻止面板启动。
 	if fm, err := filemgr.New(cfg.FileRoot); err != nil {

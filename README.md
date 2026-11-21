@@ -97,8 +97,8 @@ curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/main/dep
 生产环境建议锁定版本，让脚本和二进制取同一个 tag，避免 `main` 更新后错配：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.3.7/deploy/bootstrap.sh \
-    | sudo bash -s -- --ref v0.3.7
+curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.3.8/deploy/bootstrap.sh \
+    | sudo bash -s -- --ref v0.3.8
 ```
 
 只体检、不安装（逐项报告能力，不改动系统）：
@@ -322,6 +322,37 @@ Windows 上无法创建 PTY。有 FAIL 时脚本以退出码 1 结束，可用�
 不用再点一次「+ 用户」。REALITY 的私钥、公钥、shortId 全部自动生成，表单只需要
 伪装目标与 SNI（默认 `www.cloudflare.com`）。`xtls-rprx-vision` 只在 TCP 上生效，
 创建用户时自动带上；gRPC 不带（带了会让客户端握手失败）。
+
+**NAT / 端口映射的机器**（云厂商 NAT 机型、LXC、容器 VPS）要额外填「对外端口」：
+容器内监听 47736、商家把公网 30986 转发进来时，分享链接必须写 30986。
+两处可填，任选其一：
+
+- 设置里的「公网地址」直接写 `IP:端口`，相当于全局默认
+- 入站的「对外端口」，只影响这一个入站，优先级高于全局
+
+都留空则链接用监听端口 —— 独立 IP、直接暴露端口的机器不用管。
+
+连不上时按这个顺序查，一步排除一层：
+
+```bash
+# 1) 服务端有没有人在听（没输出 = Xray 没起来）
+ss -lntp | grep -E '47736|30986'
+
+# 2) Xray 到底怎么了（面板托管的子进程，日志在这里，不在 journald）
+tail -n 40 <data_dir>/xray.log     # 默认 /opt/panelvps/data/xray.log
+
+# 3) 面板自己看到的 Xray 状态
+systemctl is-active panelvps
+```
+
+```powershell
+# 4) 在你自己电脑上测公网端口（不是服务器上）
+Test-NetConnection 204.197.163.238 -Port 30986
+```
+
+第 4 步不通 = 端口映射/商家防火墙没放行，与面板和 Xray 无关；
+通了但客户端仍失败 = REALITY 层，先核对客户端里的**公钥（pbk）与 shortId**
+是否与面板「链接」里的一致（手填极容易漏）。
 
 **M1 实测结论**（2026-11-21，Xray 26.11.9）：
 

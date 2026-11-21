@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -29,6 +30,9 @@ type Manager struct {
 	apiPort  int
 	logLevel string
 	logger   *slog.Logger
+	// sink 把子进程输出落到 <data_dir>/xray.log。nil 表示只留内存环形缓冲，
+	// 用户就只能看到最后 8KB，重启后全丢。
+	sink *logSink
 
 	mu        sync.Mutex
 	cmd       *exec.Cmd
@@ -111,11 +115,11 @@ func Detect(explicit string) (string, error) {
 }
 
 // NewManager 构造管理器。binPath 为空（或不存在）时返回的管理器处于不可用状态。
-func NewManager(binPath, confDir string, apiPort int, logLevel string, logger *slog.Logger) *Manager {
+func NewManager(binPath, confDir string, apiPort int, logLevel, logPath string, logger *slog.Logger) *Manager {
 	if apiPort <= 0 {
 		apiPort = DefaultAPIPort
 	}
-	return &Manager{
+	m := &Manager{
 		binPath:  binPath,
 		confDir:  confDir,
 		apiPort:  apiPort,
@@ -123,6 +127,18 @@ func NewManager(binPath, confDir string, apiPort int, logLevel string, logger *s
 		logger:   logger,
 		lastLog:  newRingBuffer(8 << 10),
 	}
+	if logPath != "" {
+		m.sink = newLogSink(logPath, 5<<20)
+	}
+	return m
+}
+
+// LogPath 返回落盘日志的路径，未启用时为空。
+func (m *Manager) LogPath() string {
+	if m.sink == nil {
+		return ""
+	}
+	return m.sink.path
 }
 
 // Available 表示是否探测到了可执行文件。
@@ -349,8 +365,13 @@ func (m *Manager) supervise(stop chan struct{}) {
 		}
 
 		cmd := exec.Command(m.binPath, "run", "-c", m.ConfigPath())
-		cmd.Stdout = m.lastLog
-		cmd.Stderr = m.lastLog
+		// 同时写内存环形缓冲（接口即时返回）与磁盘（日志页可查）。
+		var out io.Writer = m.lastLog
+		if m.sink != nil {
+			out = io.MultiWriter(m.lastLog, m.sink)
+		}
+		cmd.Stdout = out
+		cmd.Stderr = out
 		if err := cmd.Start(); err != nil {
 			m.recordError(fmt.Sprintf("启动失败: %v", err))
 			if !m.sleep(stop, backoff) {
