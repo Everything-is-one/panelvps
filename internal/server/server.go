@@ -299,6 +299,7 @@ func (s *Server) routes() {
 	// 设置与更新
 	s.mux.HandleFunc("GET /api/v1/settings", s.requireAuth(s.handleSettingsGet))
 	s.mux.HandleFunc("PUT /api/v1/settings", s.requireAuth(s.handleSettingsPut))
+	s.mux.HandleFunc("GET /api/v1/updates/state", s.requireAuth(s.handleUpdateState))
 	s.mux.HandleFunc("POST /api/v1/updates/check", s.requireAuth(s.handleUpdateCheck))
 	s.mux.HandleFunc("POST /api/v1/updates/apply", s.requireAuth(s.handleUpdateApply))
 

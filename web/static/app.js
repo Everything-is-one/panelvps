@@ -11,6 +11,17 @@ const state = {
   view: "overview",
   timer: null,
   proxies: null,
+  // 每次 renderApp 递增。异步回调在写 DOM 前对一下代次，
+  // 避免上一页还在飞的请求回来把新页面的内容覆盖掉。
+  gen: 0,
+  // 当前视图的取消信号：切页时 abort，挂起的 GET 立即结束，
+  // 不会出现「切走了还在等一个卡住的请求」。
+  abort: null,
+  // 最近一次检查到的版本信息（未检查为 null）。
+  update: null,
+  updateProbe: null,
+  updateCheck: null,
+  updateProbed: false,
 };
 
 const app = () => document.getElementById("app");
@@ -44,29 +55,87 @@ function el(tag, attrs, children) {
   return node;
 }
 
-async function api(method, path, body) {
-  const headers = { "Accept": "application/json" };
-  if (method !== "GET") {
-    headers["Content-Type"] = "application/json";
-    headers["X-CSRF-Token"] = state.csrf || cookie("pv_csrf");
+function abortError(name, message) {
+  const e = new Error(message);
+  e.name = name;
+  e.aborted = true;
+  return e;
+}
+
+// 切页主动取消的请求不算错误，调用方直接安静返回。
+function isCancel(e) {
+  return !!e && (e.name === "AbortError" || e.name === "CanceledError");
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// api 统一带超时与「切页取消」。
+//
+// 以前只有裸 fetch：网络抽风或者连接被中间设备挂住时，Promise 永远不落地，
+// 页面就停在「空白、不报错」的状态，只能整页刷新——这正是概览偶尔
+// 「切回来什么都没有」的来源。现在 GET 默认 12 秒超时、切页即取消，
+// 网络层失败再自动重试一次。
+async function api(method, path, body, opts) {
+  const o = opts || {};
+  const timeoutMs = o.timeout || (method === "GET" ? 12000 : 60000);
+  const retries = method === "GET" && o.retry !== false ? 1 : 0;
+
+  for (let attempt = 0; ; attempt++) {
+    const ctrl = new AbortController();
+    let reason = null;
+    const timer = setTimeout(() => {
+      reason = abortError("TimeoutError", "请求超时（" + Math.round(timeoutMs / 1000) + " 秒）");
+      ctrl.abort();
+    }, timeoutMs);
+    // 只有读请求跟随视图生命周期；写请求不能因为用户切页就丢掉。
+    // detached 用于「任务进度」这类跨页面的轮询：切页也继续盯着。
+    const viewSignal = method === "GET" && !o.detached ? (o.signal || (state.abort && state.abort.signal)) : null;
+    const onViewAbort = () => {
+      reason = abortError("AbortError", "已切换页面");
+      ctrl.abort();
+    };
+    if (viewSignal) viewSignal.addEventListener("abort", onViewAbort);
+    try {
+      if (viewSignal && viewSignal.aborted) throw abortError("AbortError", "已切换页面");
+      const headers = { "Accept": "application/json" };
+      if (method !== "GET") {
+        headers["Content-Type"] = "application/json";
+        headers["X-CSRF-Token"] = state.csrf || cookie("pv_csrf");
+      }
+      const res = await fetch(path, {
+        method,
+        headers,
+        credentials: "same-origin",
+        body: body ? JSON.stringify(body) : undefined,
+        signal: ctrl.signal,
+      });
+      let data = null;
+      try { data = await res.json(); } catch (_) { /* 空响应 */ }
+      if (!res.ok) {
+        const msg = (data && data.msg) || ("请求失败 (" + res.status + ")");
+        const err = new Error(msg);
+        err.status = res.status;
+        throw err;
+      }
+      // 统一拆信封：调用方直接拿 data，避免到处写 res.data.xxx
+      if (data && data.code === 0 && "data" in data) return data.data;
+      return data;
+    } catch (e) {
+      if (reason) throw reason;
+      if (e && e.name === "AbortError") throw abortError("AbortError", "请求已取消");
+      // fetch 的网络层失败是 TypeError（断网、连接被重置）。重试一次再放弃。
+      const network = e instanceof TypeError;
+      if (network && attempt < retries) {
+        await sleep(320);
+        continue;
+      }
+      if (network) throw new Error("无法连接面板服务（网络中断或服务未响应）");
+      throw e;
+    } finally {
+      clearTimeout(timer);
+      if (viewSignal) viewSignal.removeEventListener("abort", onViewAbort);
+    }
   }
-  const res = await fetch(path, {
-    method,
-    headers,
-    credentials: "same-origin",
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  let data = null;
-  try { data = await res.json(); } catch (_) { /* 空响应 */ }
-  if (!res.ok) {
-    const msg = (data && data.msg) || ("请求失败 (" + res.status + ")");
-    const err = new Error(msg);
-    err.status = res.status;
-    throw err;
-  }
-  // 统一拆信封：调用方直接拿 data，避免到处写 res.data.xxx
-  if (data && data.code === 0 && "data" in data) return data.data;
-  return data;
 }
 
 function fmtBytes(n) {
@@ -264,6 +333,7 @@ function modal(title, bodyNodes, onClose) {
 // ---------- 登录 ----------
 
 function renderLogin(message) {
+  resetView();
   const username = el("input", { id: "u", autocomplete: "username", placeholder: "用户名" });
   const password = el("input", { id: "p", type: "password", autocomplete: "current-password", placeholder: "密码" });
   const msg = el("div", { class: "msg" + (message ? " err" : ""), text: message || "" });
@@ -315,6 +385,7 @@ function renderLogin(message) {
 // ---------- 首次改密 ----------
 
 function renderChangePassword(forced) {
+  resetView();
   const oldPwd = el("input", { type: "password", autocomplete: "current-password", placeholder: "当前密码" });
   const newPwd = el("input", { type: "password", autocomplete: "new-password", placeholder: "新密码（至少 12 位，两类字符）" });
   const again = el("input", { type: "password", autocomplete: "new-password", placeholder: "再次输入" });
@@ -421,14 +492,28 @@ function icon(name, size) {
   return svg;
 }
 
-function renderApp(view) {
-  state.view = view || state.view || "overview";
+// 离开当前视图：停掉轮询、取消在飞的读请求、执行清理钩子。
+// 之前定时器只在 renderApp 里清，登录页 / 改密页不清——概览的 3 秒轮询
+// 会活到登录页上，401 一来又把登录页整块重画，看着像「页面自己刷掉了」。
+function resetView() {
+  state.gen++;
+  if (state.abort) {
+    try { state.abort.abort(); } catch (_) { /* 已经取消过 */ }
+  }
+  state.abort = new AbortController();
   if (state.timer) { clearInterval(state.timer); state.timer = null; }
-  // 上一个视图注册的清理钩子（终端要断开 socket、释放 xterm 实例）
   if (typeof state.cleanup === "function") {
     try { state.cleanup(); } catch (_) { /* 清理失败不影响切换 */ }
-    state.cleanup = null;
   }
+  state.cleanup = null;
+  // 这些是页面级缓存函数，切走后必须失效，否则别的页面会调到旧闭包
+  window.__proxyRefresh = null;
+  window.__relayRefresh = null;
+}
+
+function renderApp(view) {
+  state.view = view || state.view || "overview";
+  resetView();
 
   const logout = async () => {
     try { await api("POST", "/api/v1/auth/logout", {}); } catch (_) { /* 忽略 */ }
@@ -436,11 +521,19 @@ function renderApp(view) {
     renderLogin("");
   };
 
-  const navButton = ([key, label]) => el("button", {
-    class: "nav-item" + (state.view === key ? " active" : ""),
-    onclick: () => renderApp(key),
-    title: label,
-  }, [icon(key), el("span", { text: label })]);
+  const navButton = ([key, label]) => {
+    const kids = [icon(key), el("span", { text: label })];
+    // 有新版本时给「设置」加一个小圆点，不打开设置也能看到提示
+    if (key === "settings" && state.update && state.update.available) {
+      kids.push(el("span", { class: "nav-dot", title: "有新版本 " + state.update.latest }));
+    }
+    return el("button", {
+      class: "nav-item" + (state.view === key ? " active" : ""),
+      "data-key": key,
+      onclick: () => renderApp(key),
+      title: label,
+    }, kids);
+  };
   const navItems = NAV_GROUPS.map(([label, items]) => el("div", { class: "nav-group" },
     (label ? [el("div", { class: "nav-label", text: label })] : []).concat(items.map(navButton))));
 
@@ -497,15 +590,38 @@ function renderApp(view) {
     case "settings": renderSettingsView(content); break;
     default: renderOverviewView(content);
   }
+
+  // 每次会话只探一次；失败静默，设置页可手动重试
+  autoUpdateProbe();
 }
 
 // ---------- 概览 ----------
 
+// 骨架卡沿用正式卡片的骨架（标题 / 数值 / 进度条 / 说明），
+// 数据回来时高度不变，不会整页往上跳。
+function statSkeleton(key, withBar) {
+  return statCard(key, "—", "读取中…", withBar ? 0 : undefined);
+}
+
+function tableNoticeRow(text, cols, action) {
+  const cell = el("td", { colspan: String(cols || 2), class: "table-notice" }, [el("span", { text: text })]);
+  if (action) cell.appendChild(action);
+  return el("tr", {}, [cell]);
+}
+
 function renderOverviewView(root) {
+  // 当前视图代次：异步回调回来时若已经切页，就别再动这份 DOM
+  const gen = state.gen;
+  const alive = () => gen === state.gen;
+
   const banner = el("div", { class: "banner", text: "", style: "display:none" });
-  const grid = el("div", { class: "grid stat-grid" });
-  const infoBody = el("tbody");
-  const sysBody = el("tbody");
+  // 先摆骨架：请求再慢也看得到卡片与表头，不会是一片空白
+  const grid = el("div", { class: "grid stat-grid" }, [
+    statSkeleton("CPU", true), statSkeleton("内存", true), statSkeleton("磁盘", true), statSkeleton("面板占用", false),
+  ]);
+  let loaded = false;
+  const infoBody = el("tbody", {}, [tableNoticeRow("读取中…", 2)]);
+  const sysBody = el("tbody", {}, [tableNoticeRow("读取中…", 2)]);
   const status = el("div", { class: "msg" });
 
   root.replaceChildren(
@@ -520,10 +636,13 @@ function renderOverviewView(root) {
     status,
   );
 
+  const num = (v) => (typeof v === "number" && isFinite(v) ? v : 0);
+
   // 主机信息基本不变，只取一次；资源指标才需要轮询
   const loadHost = async () => {
     try {
       const d = await api("GET", "/api/v1/system/info");
+      if (!alive()) return;
       const o = d.os || {};
       const rows = [
         ["主机名", o.hostname],
@@ -537,22 +656,26 @@ function renderOverviewView(root) {
       sysBody.replaceChildren.apply(sysBody, rows.map(([k, v]) =>
         el("tr", {}, [el("th", { text: k }), el("td", { class: "mono", text: String(v || "-") })])));
     } catch (e) {
+      if (!alive() || isCancel(e)) return;
       if (e.status === 401) { renderLogin("会话已失效，请重新登录"); return; }
-      sysBody.replaceChildren(el("tr", {}, [el("td", { text: e.message })]));
+      sysBody.replaceChildren(tableNoticeRow("系统信息读取失败：" + e.message + " ", 2,
+        el("button", { class: "ghost", text: "重试", onclick: () => loadHost() })));
     }
   };
 
   const refresh = async () => {
     try {
       const data = await api("GET", "/api/v1/system/stat");
-      const s = data.metrics;
+      if (!alive()) return;
+      const s = data.metrics || {};
+      loaded = true;
       grid.replaceChildren(
-        statCard("CPU", s.cpu_pct ? s.cpu_pct.toFixed(1) + "%" : "—",
-          (s.container ? "宿主负载 " : "负载 ") + s.load1.toFixed(2) + " / " + s.load5.toFixed(2) + " / " + s.load15.toFixed(2),
-          Math.round(s.cpu_pct), "cpu"),
+        statCard("CPU", s.cpu_pct ? num(s.cpu_pct).toFixed(1) + "%" : "—",
+          (s.container ? "宿主负载 " : "负载 ") + num(s.load1).toFixed(2) + " / " + num(s.load5).toFixed(2) + " / " + num(s.load15).toFixed(2),
+          Math.round(num(s.cpu_pct)), "cpu"),
         statCard("内存", fmtBytes(s.mem_used), (s.container ? "cgroup 限额 " : "共 ") + fmtBytes(s.mem_total), pct(s.mem_used, s.mem_total), "mem"),
         statCard("磁盘", fmtBytes(s.disk_used), "共 " + fmtBytes(s.disk_total), pct(s.disk_used, s.disk_total), "disk"),
-        statCard("面板占用", fmtBytes(s.panel_rss), s.goroutines + " goroutines"),
+        statCard("面板占用", fmtBytes(s.panel_rss), num(s.goroutines) + " goroutines"),
       );
 
       if (!s.supported) {
@@ -560,6 +683,7 @@ function renderOverviewView(root) {
         banner.textContent = "当前系统不是 Linux，系统指标不可用（仅用于本地开发调试）。";
       }
 
+      const up = num(s.uptime_sec);
       const rows = [
         ["面板端口", data.listen],
         ["监听范围", data.loopback ? "仅本机（安全）" : "对外网开放"],
@@ -568,21 +692,50 @@ function renderOverviewView(root) {
         ["审计条数", String(data.audit_count)],
         ["版本", data.version],
         ["采集口径", s.container ? "cgroup 限额（容器内准确）" : "宿主机 /proc"],
-        ["运行时长", Math.floor(s.uptime_sec / 3600) + " 小时 " + Math.floor((s.uptime_sec % 3600) / 60) + " 分"],
+        ["运行时长", Math.floor(up / 3600) + " 小时 " + Math.floor((up % 3600) / 60) + " 分"],
       ];
       infoBody.replaceChildren.apply(infoBody, rows.map(([k, v]) =>
-        el("tr", {}, [el("th", { text: k }), el("td", { class: "mono", text: v })])));
-      status.textContent = "";
+        el("tr", {}, [el("th", { text: k }), el("td", { class: "mono", text: String(v === undefined || v === null || v === "" ? "-" : v) })])));
+      status.className = "msg";
+      status.replaceChildren();
     } catch (err) {
+      if (!alive() || isCancel(err)) return;
       if (err.status === 401) { renderLogin("会话已失效，请重新登录"); return; }
+      // 出错也要给出可操作的东西，而不是留着空卡片
+      // 两个位置各要一个按钮：同一个节点 append 到第二处会从第一处移走
+      const retryBtn = () => el("button", { class: "ghost", text: "立即重试", onclick: () => refresh() });
+      // 首次就没拿到数据：把「加载中」换成明确的失败态，
+      // 否则一直转着，看起来像卡死。已有数据则保留，避免轮询抖一下就把表清空。
+      if (!loaded) {
+        grid.replaceChildren(
+          statCard("CPU", "—", "读取失败", 0),
+          statCard("内存", "—", "读取失败", 0),
+          statCard("磁盘", "—", "读取失败", 0),
+          statCard("面板占用", "—", "读取失败"),
+        );
+        infoBody.replaceChildren(tableNoticeRow("面板信息读取失败 ", 2, retryBtn()));
+      }
       status.className = "msg err";
-      status.textContent = err.message;
+      status.replaceChildren(
+        el("span", { text: "指标读取失败：" + err.message + " " }),
+        retryBtn(),
+      );
     }
   };
 
+  // 定时器同步挂上：若等 refresh() 的 await 回来再赋值，
+  // 用户在这期间切页会导致 clearInterval 落空，留下一个野轮询。
   loadHost();
   refresh();
-  state.timer = setInterval(refresh, 3000);
+  state.timer = setInterval(() => { if (alive()) refresh(); }, 3000);
+
+  // 浏览器会把后台标签页的定时器节流到每分钟一次甚至冻结，
+  // 切回标签页时立刻补一次，避免看到几分钟前的数字。
+  const onVisible = () => {
+    if (document.visibilityState === "visible" && alive()) refresh();
+  };
+  document.addEventListener("visibilitychange", onVisible);
+  state.cleanup = () => document.removeEventListener("visibilitychange", onVisible);
 }
 
 // ---------- 代理 ----------
@@ -1347,6 +1500,72 @@ function simpleTable(headers, rows) {
     el("thead", {}, [el("tr", {}, headers.map((h) => el("th", { text: h })))]),
     el("tbody", {}, rows),
   ]);
+}
+
+// ---------- 版本检查 ----------
+//
+// 自动检查走服务端缓存（10 分钟内不重复回源），手动检查强制回源。
+// 打开面板时静默探一次，打开设置页时再确认一次——都失败也不打扰人，
+// 只有设置页里会显示失败原因和重试按钮。
+
+const UPDATE_TTL_MS = 10 * 60 * 1000;
+
+function updateAge(u) {
+  if (!u || !u.checked_at) return Infinity;
+  const t = Date.parse(u.checked_at);
+  return isNaN(t) ? Infinity : Date.now() - t;
+}
+
+function applyUpdateInfo(u) {
+  if (!u) return;
+  state.update = u;
+  syncUpdateBadge();
+}
+
+// 侧边栏「设置」上的小圆点：不打开设置也能看到有新版本
+function syncUpdateBadge() {
+  const on = !!(state.update && state.update.available);
+  document.querySelectorAll('.nav-item[data-key="settings"]').forEach((btn) => {
+    let dot = btn.querySelector(".nav-dot");
+    if (on) {
+      if (!dot) {
+        dot = el("span", { class: "nav-dot" });
+        btn.appendChild(dot);
+      }
+      dot.title = "有新版本 " + state.update.latest;
+    } else if (dot) {
+      dot.remove();
+    }
+  });
+}
+
+// 同一时刻只允许一个检查请求：启动探测与设置页自动检查可能撞在一起
+function checkUpdate(force) {
+  if (state.updateCheck) return state.updateCheck;
+  state.updateCheck = api("POST", "/api/v1/updates/check", { force: !!force }, { timeout: 30000 })
+    .then((u) => { applyUpdateInfo(u); return u; })
+    .finally(() => { state.updateCheck = null; });
+  return state.updateCheck;
+}
+
+// 启动时静默探测：先读服务端缓存，过期才回源。失败完全安静。
+async function autoUpdateProbe() {
+  if (state.updateProbed) return state.updateProbe;
+  state.updateProbed = true;
+  state.updateProbe = (async () => {
+    try {
+      // detached：探测独立于页面切换，否则刚登录就点别的页会把请求掐掉，
+      // 本次会话就再也不会自动检查了。
+      const d = await api("GET", "/api/v1/updates/state", null, { timeout: 8000, detached: true });
+      if (d && d.update) applyUpdateInfo(d.update);
+      if (updateAge(d && d.update) > UPDATE_TTL_MS) await checkUpdate(false);
+    } catch (_) {
+      // 断网 / GitHub 不可达：不提示，设置页里可以手动重试
+    } finally {
+      state.updateProbe = null;
+    }
+  })();
+  return state.updateProbe;
 }
 
 function emptyHint(text) {
@@ -2797,6 +3016,17 @@ function renderSettingsView(root) {
   const terminalChk = el("input", { type: "checkbox" });
   const info = el("tbody");
   const updateBox = el("div");
+  let updateCard = null;
+
+  // 「发现新版本」横幅：设置页一打开就能看到，不用先滚到底部
+  const showUpdateBanner = (u) => {
+    if (!u || !u.available || root.querySelector(".update-banner")) return;
+    const go = () => { if (updateCard) updateCard.scrollIntoView({ behavior: "smooth", block: "center" }); };
+    root.insertBefore(el("div", { class: "banner update-banner" }, [
+      el("span", { text: "发现新版本 " + u.latest + "（当前 " + u.current + "），可一键下载替换。" }),
+      el("button", { class: "ghost", text: "查看更新", onclick: go }),
+    ]), root.firstChild);
+  };
 
   // 访问方式（原「控制」页，收进设置）
   const accessPort = el("input", { type: "number", min: "1", max: "65535", style: "max-width:130px" });
@@ -2921,6 +3151,8 @@ function renderSettingsView(root) {
       info.replaceChildren.apply(info, rows.map(([k, v]) =>
         el("tr", {}, [el("th", { text: k }), el("td", { class: "mono", text: String(v || "-") })])));
       paintUpdate(d.update);
+      if (d.update && d.update.available) showUpdateBanner(d.update);
+      autoCheck(d.update);
       loadUnit();
       if (FE_VERSION && p.version && p.version !== FE_VERSION) {
         const stale = el("div", { class: "msg err", style: "margin-bottom:12px" }, [
@@ -2940,11 +3172,12 @@ function renderSettingsView(root) {
       updateBox.replaceChildren(el("div", { class: "hint", text: "尚未检查更新" }));
       return;
     }
+    applyUpdateInfo(u);
     const body = [
       el("div", { class: "row wrap" }, [
         badge("当前 " + u.current, "muted"),
         u.available ? badge("可更新到 " + u.latest, "ok") : badge("已是最新", "ok"),
-        el("span", { class: "hint", text: "检查于 " + fmtTime(u.checked_at) }),
+        el("span", { class: "hint", text: "检查于 " + fmtTime(u.checked_at) + " · 每次打开会自动检查" }),
       ]),
     ];
     if (u.notes) body.push(el("pre", { class: "log", text: u.notes }));
@@ -2960,6 +3193,45 @@ function renderSettingsView(root) {
       ]));
     }
     updateBox.replaceChildren.apply(updateBox, body);
+  };
+
+  // 打开设置页就自动检查：服务端 10 分钟内复用缓存，不会把 GitHub 限流打满。
+  // 有缓存且新鲜时只回填、不发请求；过期才真正回源。
+  // 手动检查（force=true）：每次都真正回源，失败可原地重试
+  const manualCheck = async () => {
+    updateBox.replaceChildren(el("div", { class: "hint", text: "检查中…" }));
+    try {
+      const u = await checkUpdate(true);
+      paintUpdate(u);
+      if (u && u.available) showUpdateBanner(u);
+    } catch (e) {
+      updateBox.replaceChildren(
+        el("div", { class: "msg err", text: "检查失败：" + e.message }),
+        el("div", { class: "actions" }, [
+          el("button", { class: "ghost", text: "重试", onclick: manualCheck }),
+        ]),
+      );
+    }
+  };
+
+  const autoCheck = async (cached) => {
+    if (cached && updateAge(cached) <= UPDATE_TTL_MS) { applyUpdateInfo(cached); return; }
+    const line = el("div", { class: "hint", text: "正在自动检查新版本…" });
+    if (cached) updateBox.appendChild(line);
+    else updateBox.replaceChildren(line);
+    try {
+      const u = await checkUpdate(false);
+      paintUpdate(u);
+      if (u && u.available) showUpdateBanner(u);
+    } catch (e) {
+      line.className = "msg err";
+      line.textContent = "自动检查失败：" + e.message;
+      if (!cached) {
+        updateBox.replaceChildren(line, el("div", { class: "actions" }, [
+          el("button", { class: "ghost", text: "重试", onclick: manualCheck }),
+        ]));
+      }
+    }
   };
 
   // 服务单元自检：设置页的「版本更新」只替换二进制，不换 /etc/systemd 下的单元。
@@ -3061,17 +3333,13 @@ function renderSettingsView(root) {
     ]),
     card("运行参数", [el("table", {}, [info])]),
     card("服务单元", [unitBox]),
-    card("版本更新", [
+    (updateCard = card("版本更新", [
       el("div", { class: "actions", style: "margin-top:0" }, [
-        el("button", { text: "检查更新", onclick: async () => {
-          updateBox.replaceChildren(el("div", { class: "hint", text: "检查中…" }));
-          try { paintUpdate(await api("POST", "/api/v1/updates/check", {})); }
-          catch (e) { updateBox.replaceChildren(el("div", { class: "msg err", text: e.message })); }
-        } }),
-        el("span", { class: "hint", text: "从 GitHub Release 下载，校验 sha256 后原子替换，保留上一版" }),
+        el("button", { text: "检查更新", onclick: manualCheck }),
+        el("span", { class: "hint", text: "打开本页会自动检查；也可以随时手动回源。更新从 GitHub Release 下载，校验 sha256 后原子替换，保留上一版" }),
       ]),
       updateBox,
-    ]),
+    ])),
   );
   load();
 }
@@ -3083,7 +3351,7 @@ function watchJob(job, onDone) {
   const m = modal("执行中 · " + (job.target || job.kind), [logBox]);
   const timer = setInterval(async () => {
     try {
-      const j = await api("GET", "/api/v1/system/jobs/" + job.id);
+      const j = await api("GET", "/api/v1/system/jobs/" + job.id, null, { detached: true, retry: false });
       logBox.textContent = j.log || "…";
       logBox.scrollTop = logBox.scrollHeight;
       if (j.status !== "running") {
