@@ -98,7 +98,7 @@ func New(cfg *config.Config, st *store.Store, logger *slog.Logger) (*Server, err
 	}
 
 	// Xray 不在也不影响面板启动：代理模块以「不可用」状态呈现，
-	// 运维功能照常工作。这比启动即失败更符合 1GB 小机器的现实。
+	// 运维功能照常工作。这比启动即失败更符合低内存机器的现实。
 	bin, detectErr := xray.Detect(cfg.XrayBin)
 	if detectErr != nil {
 		logger.Warn("未探测到 Xray，代理功能不可用", "err", detectErr)

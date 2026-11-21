@@ -1,6 +1,6 @@
 # PanelVPS
 
-> 1GB 内存 VPS 上的轻量运维面板，内置 Xray 代理管理。
+> 用 Go 写的单二进制 VPS 管理面板，带 Xray 代理管理，512MB 可用内存就能跑。
 
 [![CI](https://github.com/Everything-is-one/panelvps/actions/workflows/ci.yml/badge.svg)](https://github.com/Everything-is-one/panelvps/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -9,13 +9,12 @@
 
 ## 这是什么
 
-一台 2C1G 的 Debian VPS：装宝塔要吃掉 250–400MB，装 x-ui 又只有代理、没有运维。
-PanelVPS 用一个 **≤ 50MB 的 Go 单二进制**，同时提供：
+PanelVPS 把 VPS 上常做的几件事放进一个网页：看资源、改文件、开终端、查日志、配防火墙、建站，
+另外带一套 Xray 代理管理（VLESS / VMess / Trojan / Shadowsocks，多用户、流量统计、配额与到期），
+不用再单独装 x-ui。
 
-- **宝塔式的日常运维**：资源监控、文件管理、Web 终端、日志、防火墙、网站
-- **x-ui 式的代理管理**：VLESS / VMess / Trojan / Shadowsocks、多用户、流量与到期限制
-
-**不依赖 Docker**（目标机 4.14 内核跑不动 runc），**不依赖 Python / Node 运行时**。
+只有一个二进制，前端资源在编译时打包进去，数据存 SQLite，运行时不依赖 Docker、Python 或 Node。
+空载内存 50MB 左右，512MB 可用内存的机器上还能留出空间跑站点和代理。
 
 ## 当前状态
 
@@ -27,11 +26,11 @@ PanelVPS 用一个 **≤ 50MB 的 Go 单二进制**，同时提供：
 | M3 | 网站与商店：站点/证书/PHP、声明式软件商店 | ✅ 已完成 |
 | M4 | 打磨：备份、告警、自更新、签名发布 | ✅ 已完成（签名发布未做） |
 
-## 三条硬约束
+## 资源与范围
 
-1. 面板空载 RSS ≤ 50MB，二进制 ≤ 25MB（当前 13MB）
-2. 面板 + Xray + Nginx + PHP ≤ 320MB（1GB 机器留 700MB 给业务）
-3. 不做容器、不做无限扩展的应用市场、不做多节点
+- 面板空载 RSS ≤ 50MB，二进制 13MB（发布上限 25MB）
+- 面板 + Xray + Nginx + PHP 按 320MB 以内设计，512MB 可用内存下仍有余量
+- 不做容器管理、不做大而全的应用市场、不做多节点
 
 ## 功能一览
 
@@ -91,7 +90,7 @@ Debian 12 / Ubuntu 22.04+，amd64 与 arm64 均支持。自动判断架构、下
 curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/main/deploy/bootstrap.sh | sudo bash
 ```
 
-生产环境建议锁定版本——脚本与二进制都取同一个 tag，不会因为 `main` 更新而错配：
+生产环境建议锁定版本，让脚本和二进制取同一个 tag，避免 `main` 更新后错配：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.1.0/deploy/bootstrap.sh \
@@ -138,7 +137,7 @@ ssh -L 20873:127.0.0.1:20873 root@<服务器IP>
 ```
 
 确实需要公网直连时，改 `/opt/panelvps/conf/panel.yaml` 的 `listen`，
-但请同时配好防火墙与 TLS 反代——面板自己不做 HTTPS，裸奔的管理后台等于把 root 交出去。
+但请同时配好防火墙和 TLS 反向代理。面板自己不做 HTTPS，管理后台裸奔等于把 root 交出去。
 
 ### 在 LXC / 容器里安装
 
@@ -225,7 +224,7 @@ Windows 上无法创建 PTY。有 FAIL 时脚本以退出码 1 结束，可用�
 
 | 能力 | 说明 |
 |---|---|
-| 认证 | argon2id（m=19MiB，为 1GB 机器选的低内存档）、12 位起步的密码策略、弱密码表 |
+| 认证 | argon2id（m=19MiB，低内存档）、12 位起步的密码策略、弱密码表 |
 | 会话 | 令牌只存 SHA-256、HttpOnly + SameSite=Lax、改密后踢掉所有旧会话 |
 | 防爆破 | 同 IP 5 次失败封 1 小时，进程内计数 |
 | CSRF | 双提交 Cookie + `X-CSRF-Token` 请求头 |
@@ -250,7 +249,7 @@ Windows 上无法创建 PTY。有 FAIL 时脚本以退出码 1 结束，可用�
 | 分享链接 | vless / vmess / trojan / ss 四种；二维码服务端生成，前端零依赖 |
 | 密钥 | REALITY X25519 密钥对、UUIDv4、SS-2022 定长 PSK 均由服务端生成 |
 
-**M1 实测结论**（2026-11-21，Windows + Xray 26.11.9）：
+**M1 实测结论**（2026-11-21，Xray 26.11.9）：
 
 - 五种入站组合生成的配置全部通过真实 `xray -test`
 - 客户端经 VLESS 入站访问 `gstatic/generate_204` 返回 204、访问 `api.github.com` 返回 200
@@ -267,7 +266,7 @@ Windows 上无法创建 PTY。有 FAIL 时脚本以退出码 1 结束，可用�
 | 服务与进程 | 服务名正则白名单、动作白名单（start/stop/restart/reload/enable/disable） |
 | Web 终端 | PTY + WebSocket；一次性票据（2 分钟、单次使用），不把 Cookie 放进 URL；shell 必须是绝对路径 |
 | 防火墙 | `nft` 建表探测失败自动降级 `iptables-legacy`；SSH 与面板端口**永远排在用户 drop 规则之前**；nft set 自带 timeout 实现到期自动解封 |
-| 日志 | 六个固定来源，不接受任意路径；只 seek 文件末尾 512KB，不会把 1GB 日志读进内存 |
+| 日志 | 六个固定来源，不接受任意路径；只 seek 文件末尾 512KB，不会把整个日志读进内存 |
 | 异步任务 | 内存态执行器，并发 2、单任务 15 分钟超时、日志上限 256KB，避免 apt/证书撑爆 HTTP 超时 |
 
 ## M3 已实现的契约（网站与商店）
@@ -290,7 +289,7 @@ Windows 上无法创建 PTY。有 FAIL 时脚本以退出码 1 结束，可用�
 | 告警 | 单一通用 Webhook（POST JSON），5 分钟内相同标题去重，避免告警风暴 |
 | 自更新 | 只信任 https + GitHub 域名的 release 资源；下载后校验 sha256，替换前校验 ELF 头，保留 `.old-<时间戳>` |
 
-**M2–M4 端到端实测**（2026-11-21，Windows 本地实例 + 假 nginx，82 项）：
+**M2–M4 端到端实测**（2026-11-21，本地实例 + 假 nginx，82 项）：
 
 - 认证：未登录 401、错密码 401、缺 CSRF 403、弱密码 400、改密后旧会话失效
 - 文件：穿越 403、绝对路径按根相对、上传下载字节一致、打包解压往返、删除需 `confirm=DELETE`

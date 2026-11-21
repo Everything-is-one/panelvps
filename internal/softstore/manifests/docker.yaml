@@ -9,7 +9,7 @@ ports: []
 deps: []
 conflicts: [docker-ce, containerd]
 risk: high
-warning: 本机 4.14 内核必须先在 GRUB 加 systemd.unified_cgroup_hierarchy=0 并重启，否则容器会一直停在 Created；1GB 机器上装完可用内存会明显变紧，不建议与 MariaDB 同时使用。
+warning: 部分旧内核（4.x）缺少 runc 所需的 eBPF 设备过滤，容器可能一直停在 Created，需要调整 cgroup 配置或升级内核；512MB 可用内存的机器装完会更紧，不建议与 MariaDB 同时使用。
 plan:
   install:
     - apt: { names: [docker.io], update: true }

@@ -1,7 +1,7 @@
 // Package metrics 从 /proc 直接读取系统指标，不依赖 cgo 与第三方库。
 //
 // 之所以不用 gopsutil：这里只需要 6 个数字，自己读 /proc 更省内存，
-// 也避免在 1GB 机器上多引一层依赖。非 Linux 平台返回零值并标记 Unsupported。
+// 也避免在低内存机器上多引一层依赖。非 Linux 平台返回零值并标记 Unsupported。
 package metrics
 
 import (

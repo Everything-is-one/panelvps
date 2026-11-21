@@ -470,7 +470,7 @@ func (f *flexInt) UnmarshalJSON(b []byte) error {
 // QueryStats 通过 xray 自带 CLI 读取统计，避免引入 gRPC 与 protobuf 依赖。
 //
 // 代价是每次查询起一个短命子进程（约 30–60ms），由后台每分钟采样一次，
-// 对 1GB 机器完全可接受。
+// 对低内存机器完全可接受。
 func (m *Manager) QueryStats(ctx context.Context) ([]StatEntry, error) {
 	if !m.Available() {
 		return nil, ErrNotAvailable
