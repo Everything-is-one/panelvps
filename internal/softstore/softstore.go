@@ -397,6 +397,9 @@ func (s *Store) Install(ctx context.Context, slug string, log func(string), forc
 	}
 
 	log(fmt.Sprintf("开始安装 %s（%s）", m.Name, m.Version))
+	if err := preflight(m.Plan.Install, log); err != nil {
+		return err
+	}
 	if err := runPlan(ctx, m.Plan.Install, log); err != nil {
 		log("安装失败，开始回滚")
 		rollbackCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)

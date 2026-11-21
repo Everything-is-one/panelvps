@@ -97,8 +97,8 @@ curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/main/dep
 生产环境建议锁定版本，让脚本和二进制取同一个 tag，避免 `main` 更新后错配：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.3.4/deploy/bootstrap.sh \
-    | sudo bash -s -- --ref v0.3.4
+curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.3.5/deploy/bootstrap.sh \
+    | sudo bash -s -- --ref v0.3.5
 ```
 
 只体检、不安装（逐项报告能力，不改动系统）：
@@ -345,6 +345,7 @@ Windows 上无法创建 PTY。有 FAIL 时脚本以退出码 1 结束，可用�
 | 证书 | certbot webroot 模式（HTTP-01），异步任务执行；域名与邮箱先校验格式 |
 | 软件商店 | 清单只允许 7 种动作：`apt / download / extract / write_file / path / service / check`，**不含自由脚本** |
 | 安装前检查 | 已装则跳过、冲突与依赖校验、下载必须 https 且拒绝内网/回环地址、剩余内存不足一半直接拦截 |
+| 目录预检 | 动手前先对计划写入的目录做真实写入探测，不可写就在下载安装包之前失败，并给出修复命令 |
 | 回滚 | 任一步失败按逆序撤销已执行的写文件/服务动作；非 Linux 直接 501，不假装能装 |
 
 ## M4 已实现的契约（备份与自更新）
@@ -368,6 +369,27 @@ Windows 上无法创建 PTY。有 FAIL 时脚本以退出码 1 结束，可用�
 - 更新：非 GitHub 来源 400
 
 ## 入口与内核调优
+
+### systemd 沙箱与可写目录（软件商店装不上时先看这里）
+
+从 v0.3.5 起，单元用 `ProtectSystem=full` 并明确放开 `/usr`、`/etc`、`/var`，
+`/boot` 与 `/efi` 仍然只读。之前是「full + 零散白名单」，踩过两次坑：
+
+- 白名单只放行了 `/etc/nginx/conf.d` 等几个子目录，`apt-get` 装包时写
+  `/etc/nginx`、`/var/lib/dpkg` 全线失败；
+- 白名单里的路径**不存在时 systemd 会静默跳过**（`-` 前缀），目录没建就没有
+  bind mount，面板再往里 `mkdir` 就报 `read-only file system` —— 软件商店装
+  Xray 时 `mkdir /usr/local/share/xray` 失败正是这个原因。
+
+老版本（≤ v0.3.4）原地修复：
+
+```bash
+# 补目录后重启，让 bind mount 重新解析；不升级也能装上 Xray
+sudo mkdir -p /usr/local/share/xray && sudo systemctl restart panelvps
+```
+
+升级到 v0.3.5+ 会重写单元、预创建常用目录，以上都不必手动做。
+`sudo ./install.sh --check` 可复核当前单元与目录状态。
 
 装完之后才需要的操作，分两处：**网页在「设置」页**，**命令行敲 `panelvps` 进菜单**。
 不再单独占一个导航标签——控制页要拉 BBR 状态，打开得等一两秒，而这些操作本来一个月也用不上一次。

@@ -157,6 +157,21 @@ env_report() {
         fi
     done
 
+    echo "  systemd 沙箱："
+    if [[ -f "$UNIT" ]]; then
+        if grep -q "ReadWritePaths=.*-/usr" "$UNIT"; then
+            ok "单元已放开 /usr /etc /var（/boot 仍只读）"
+        elif grep -q "/usr/local/share/xray" "$UNIT"; then
+            warn "单元还是旧的零散白名单：路径不存在时 systemd 会静默跳过，"
+            warn "软件商店会报 read-only file system。重跑安装脚本，或："
+            warn "  mkdir -p /usr/local/share/xray && systemctl restart panelvps"
+        else
+            warn "单元的 ReadWritePaths 不是最新写法，装包/建站可能写不进系统目录"
+        fi
+    else
+        warn "未找到服务单元：$UNIT"
+    fi
+
     local port=20873
     if [[ -r "$CONF" ]]; then
         port=$(grep -E '^listen:' "$CONF" | awk '{print $2}' | awk -F: '{print $2}' || true)
@@ -248,6 +263,13 @@ CONTAINER=$(detect_container)
 info "创建目录"
 mkdir -p "$PREFIX/bin" "$PREFIX/conf" "$DATA"
 chmod 700 "$DATA"
+
+# 面板要写的系统目录不一定存在（比如没装 nginx 时没有 /etc/nginx/conf.d）。
+# 提前建出来：一来写操作不会因为缺目录失败，二来以后装了 nginx 也不必修
+# 目录再重启面板。
+info "准备面板常用目录"
+mkdir -p /usr/local/share /etc/nftables.d /etc/sysctl.d /etc/systemd/system \
+         /etc/nginx/conf.d /etc/xray /etc/letsencrypt /var/lib/letsencrypt /var/log/letsencrypt
 
 if systemctl is-active --quiet panelvps 2>/dev/null; then
     info "停止旧版本"

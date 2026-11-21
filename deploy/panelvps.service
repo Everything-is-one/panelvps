@@ -20,23 +20,25 @@ Environment=GOGC=50
 MemoryMax=256M
 
 # ---- 加固 ----
-# 只保护系统二进制与 /etc，不再把整机挂成只读。
+# 别用白名单。这个单元被改过两轮，两次都是白名单漏了路径：
+#   1. strict + 白名单 → 文件管理器 mkdir /home/aaa 报 read-only；
+#   2. full + 零散白名单 → 软件商店装 Xray 时 mkdir /usr/local/share/xray
+#      报 read-only。后者更隐蔽：systemd 对白名单里**不存在**的路径是
+#      静默跳过的（- 前缀），目录没建就没有 bind mount，照样只读。
 #
-# 之前用 strict + ReadWritePaths 白名单，结果是用户在文件管理器里
-# mkdir /home/aaa 直接报 read-only file system —— 面板的本职就是管文件，
-# 白名单永远列不全用户想写的地方（/home、/root、/srv、/mnt、/opt）。
-# full 仍然让 /usr、/boot、/etc 只读，能挡住替换系统二进制这类持久化。
+# 面板的本职就是改系统：装包（apt 写 /usr /var/lib/dpkg /etc）、下发站点与
+# 防火墙配置、切换内核参数。full 下这些全被挡住，功能就是缺的。
+#
+# 所以：full + 明确放开 /usr /etc /var。/boot 与 /efi 仍然只读，
+# 改不了内核与引导。写保护对 root 面板的收益本来有限（它能写 systemd
+# 单元、带 CAP_DAC_OVERRIDE），真正有用的是下面这些：能力集、地址族、
+# 内核参数与模块、cgroup —— 这些才是挡提权与横向移动的地方。
 ProtectSystem=full
+ReadWritePaths=-/etc -/usr -/var
 # /home 与 /root 必须可写：站点、备份、用户目录都在这里。
 # /tmp 与系统共用：PrivateTmp 会让文件管理器看到的 /tmp 和 SSH 里不是同一个目录，
 # 用户上传完再登录找不到文件，这是纯粹的困惑源。
 PrivateTmp=no
-# full 下 /etc 只读，这些子目录要写：建站、防火墙下发、内核参数、安装服务单元
-ReadWritePaths=-/opt/panelvps/data -/opt/panelvps/conf \
-               -/etc/nginx/conf.d -/etc/nftables.d -/etc/sysctl.d \
-               -/etc/systemd/system \
-               -/etc/letsencrypt -/var/lib/letsencrypt -/var/log/letsencrypt \
-               -/etc/xray -/usr/local/bin -/usr/local/share/xray
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
