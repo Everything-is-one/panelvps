@@ -76,6 +76,40 @@ go build -trimpath -ldflags "-s -w" -o bin/panelvps ./cmd/panelvps
 
 默认只监听 `127.0.0.1:20873`，浏览器直接访问即可。
 
+### 一键安装
+
+服务器上一条命令，自动按架构选二进制、校验 SHA256、装服务：
+
+```bash
+curl -fsSL https://<分发地址>/bootstrap.sh | sudo bash
+```
+
+`bootstrap.sh` 支持三种来源，按优先级：
+
+| 来源 | 用法 | 适用 |
+|---|---|---|
+| `--base URL` | `--base https://dl.example.com/panelvps` | 私有仓库 / 国内网络，推荐 |
+| GitHub raw | 默认，`--repo` `--ref` 可覆盖 | 仓库公开且发布过 Release |
+| 本地文件 | `sudo ./deploy/install.sh` | 已手工上传安装包 |
+
+**私有仓库不能直接用 raw 地址**：`raw.githubusercontent.com` 只认公开仓库，带 token 也拉不到。
+先跑一次发布脚本，把安装包推到自己的静态目录：
+
+```bash
+# 本机执行：交叉编译 → 生成 SHA256SUMS → 上传
+./scripts/publish.sh root@1.2.3.4:/www/wwwroot/dl.example.com/panelvps \
+    --base https://dl.example.com/panelvps
+```
+
+之后所有小鸡都能用同一条命令安装，也可以只体检：
+
+```bash
+curl -fsSL https://dl.example.com/panelvps/bootstrap.sh | sudo bash -s -- --check
+```
+
+> 走 GitHub 公开路径需要先打 tag 并上传 Release 资产（`panelvps-linux-amd64`、`panelvps-linux-arm64`），
+> 仓库里不放二进制。这条路径尚未实测，本机环境无法访问 github.com。
+
 ### 安装到服务器
 
 ```bash
@@ -296,8 +330,8 @@ internal/
   version/           构建期注入的版本信息
   xray/              配置生成、进程托管、统计读取、分享链接与二维码
 web/                 embed 的前端静态资源（零构建原生 JS）
-deploy/              systemd 单元、容器覆盖与安装脚本
-scripts/             构建脚本与冒烟测试（smoke_test.py）
+deploy/              systemd 单元、容器覆盖、安装与一键引导脚本
+scripts/             构建、发布（publish.sh）与冒烟测试
 ```
 
 ## 文档
