@@ -55,6 +55,8 @@ async function api(method, path, body) {
     err.status = res.status;
     throw err;
   }
+  // 统一拆信封：调用方直接拿 data，避免到处写 res.data.xxx
+  if (data && data.code === 0 && "data" in data) return data.data;
   return data;
 }
 
@@ -324,7 +326,7 @@ function renderProxyView(root) {
           try {
             const r = await api("PUT", "/api/v1/proxies/preferences", { public_host: hostInput.value.trim() });
             hostMsg.className = "msg ok";
-            hostMsg.textContent = "已保存：" + r.data.host;
+            hostMsg.textContent = "已保存：" + r.host;
             if (window.__proxyRefresh) window.__proxyRefresh();
           } catch (e) {
             hostMsg.className = "msg err";
@@ -346,7 +348,7 @@ function renderProxyView(root) {
 
   const refresh = async () => {
     try {
-      const data = (await api("GET", "/api/v1/proxies")).data;
+      const data = await api("GET", "/api/v1/proxies");
       state.proxies = data;
       paintStatus(statusLine, data.status, banner);
       if (document.activeElement !== hostInput) hostInput.value = data.host || "";
@@ -476,7 +478,7 @@ function showLink(client) {
 async function applyConfig(root) {
   try {
     const r = await api("POST", "/api/v1/proxies/apply", {});
-    const a = r.data;
+    const a = r;
     if (a.ok) {
       modal("配置已下发", [el("p", { class: "mono", text: a.message })]);
       if (window.__proxyRefresh) window.__proxyRefresh();
@@ -589,7 +591,7 @@ function inboundForm(root) {
         security: security.value,
         options,
       });
-      const a = r.data.apply;
+      const a = r.apply;
       if (a && !a.ok) {
         msg.className = "msg err";
         msg.textContent = "已保存但下发失败：" + a.message;
@@ -637,7 +639,7 @@ function clientForm(ib, root) {
     if (expiry.value) body.expires_at = new Date(expiry.value + "T23:59:59").toISOString();
     try {
       const r = await api("POST", "/api/v1/proxies/inbounds/" + ib.id + "/clients", body);
-      const a = r.data.apply;
+      const a = r.apply;
       if (a && !a.ok) {
         msg.className = "msg err";
         msg.textContent = "已创建但下发失败：" + a.message;
