@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 # PanelVPS 一键安装引导脚本
 #
-# 公开仓库（发布过 Release 之后）：
+# 安装最新版（跟随 main 分支脚本 + latest Release 二进制）：
 #   curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/main/deploy/bootstrap.sh | sudo bash
 #
-# 自建分发（私有仓库推荐，目录里放本脚本 + install.sh + 两个 conf + bin/ + SHA256SUMS）：
+# 安装指定版本（脚本与二进制都锁在该 tag，生产环境推荐）：
+#   curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.1.0/deploy/bootstrap.sh \
+#     | sudo bash -s -- --ref v0.1.0
+#
+# 自建分发（国内访问 GitHub 慢时用，目录里放 bootstrap.sh + install.sh + 两个 conf + bin/ + SHA256SUMS）：
 #   curl -fsSL https://你的域名/panelvps/bootstrap.sh | sudo bash
 #
-# 先体检不安装：
-#   curl -fsSL https://.../bootstrap.sh | sudo bash -s -- --check
+# 只体检不安装（末尾加）：
+#   ... | sudo bash -s -- --check
 #
 # 参数：
 #   --base URL     从自有静态目录拉（优先级最高）
 #   --repo O/R     GitHub 仓库，默认 Everything-is-one/panelvps
-#   --ref REF      分支或 tag，默认 main
+#   --ref REF      分支或 tag，默认 main；写 v* 时二进制锁定到该 tag
 #   --token TOKEN  私有仓库的 GitHub token（走 API；不建议在命令行明文传）
 #   --check        只体检环境，不安装
 #   --keep         保留临时目录，便于排查
@@ -33,7 +37,24 @@ info() { echo "[*] $*"; }
 warn() { echo "[!] $*" >&2; }
 
 usage() {
-    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+    # 提取文件头连续注释块；curl|bash 时 $0 指向 bash 本身，没有文件可读，退回简短说明
+    local src="${BASH_SOURCE[0]:-$0}"
+    if [[ -r "$src" ]]; then
+        awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$src"
+        return
+    fi
+    cat <<'USAGE'
+用法: curl -fsSL <bootstrap.sh 地址> | sudo bash -s -- [选项]
+
+  --base URL     从自有静态目录拉（优先级最高）
+  --repo O/R     GitHub 仓库，默认 Everything-is-one/panelvps
+  --ref REF      分支或 tag，默认 main；写 v* 时二进制锁定到该 tag
+  --check        只体检环境，不安装
+  --keep         保留临时目录，便于排查
+  -h, --help     显示帮助
+
+完整说明见 https://github.com/Everything-is-one/panelvps/blob/main/deploy/bootstrap.sh
+USAGE
 }
 
 while [[ $# -gt 0 ]]; do
@@ -84,7 +105,7 @@ fetch() {
     curl -fsSL --connect-timeout 10 --retry 3 --retry-delay 2 "$url" -o "$out" || return 1
 }
 
-# 二进制在 GitHub 模式下只能来自 Release，不在仓库里
+# 二进制的来源：自建分发在 bin/ 下，GitHub 模式只能来自 Release（仓库里不放二进制）
 fetch_bin() {
     local out="$TMP/bin/$BIN" url
     mkdir -p "$TMP/bin"
@@ -92,6 +113,9 @@ fetch_bin() {
         url="${BASE%/}/bin/$BIN"
     elif [[ -n "$TOKEN" ]]; then
         die "私有仓库请用 --base 指定分发地址；GitHub Release 资产需要额外鉴权，不做支持"
+    elif [[ "$REF" == v* ]]; then
+        # 指定 tag 时锁定该版本的资产，脚本与二进制不会错配
+        url="https://github.com/$REPO/releases/download/$REF/$BIN"
     else
         url="https://github.com/$REPO/releases/latest/download/$BIN"
     fi
@@ -99,6 +123,25 @@ fetch_bin() {
     curl -fsSL --connect-timeout 15 --retry 3 --retry-delay 2 "$url" -o "$out" \
         || die "下载失败: $url（公开仓库需先发布 Release；否则请用 --base）"
     chmod 0755 "$out"
+}
+
+# 校验清单也要按来源取：Release 资产不是仓库文件，raw 地址上没有它。
+# 取不到不算致命（本地构建/自定义分发可能没有），但要明确告诉用户校验被跳过。
+fetch_sums() {
+    local out="$TMP/SHA256SUMS"
+    if [[ -n "$BASE" ]]; then
+        curl -fsSL --connect-timeout 10 --retry 3 --retry-delay 2 \
+            "${BASE%/}/SHA256SUMS" -o "$out" || return 1
+    elif [[ -n "$TOKEN" ]]; then
+        return 1
+    elif [[ "$REF" == v* ]]; then
+        curl -fsSL --connect-timeout 10 --retry 2 \
+            "https://github.com/$REPO/releases/download/$REF/SHA256SUMS" -o "$out" || return 1
+    else
+        curl -fsSL --connect-timeout 10 --retry 2 \
+            "https://github.com/$REPO/releases/latest/download/SHA256SUMS" -o "$out" || return 1
+    fi
+    [[ -s "$out" ]] || { rm -f "$out"; return 1; }
 }
 
 info "仓库 $REPO @ $REF，架构 $ARCH"
@@ -112,11 +155,10 @@ fetch "deploy/panelvps-container.conf" "$TMP/panelvps-container.conf" \
     || die "拉取 panelvps-container.conf 失败"
 chmod 0755 "$TMP/install.sh"
 
-# SHA256SUMS 可选：有就校验，没有就明确提示
-if fetch "SHA256SUMS" "$TMP/SHA256SUMS"; then
-    info "源提供 SHA256SUMS，安装前会校验二进制"
+# 校验清单可选：有就校验，没有就明确提示
+if fetch_sums; then
+    info "已取得 SHA256SUMS，安装前会校验二进制"
 else
-    rm -f "$TMP/SHA256SUMS"
     warn "源未提供 SHA256SUMS，跳过二进制校验"
 fi
 

@@ -2,6 +2,10 @@
 
 > 1GB 内存 VPS 上的轻量运维面板，内置 Xray 代理管理。
 
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Go](https://img.shields.io/badge/Go-1.27%2B-00ADD8.svg)](https://go.dev/)
+[![Platform](https://img.shields.io/badge/linux-amd64%20%7C%20arm64-lightgrey.svg)](#一键安装)
+
 ## 这是什么
 
 一台 2C1G 的 Debian VPS：装宝塔要吃掉 250–400MB，装 x-ui 又只有代理、没有运维。
@@ -78,49 +82,58 @@ go build -trimpath -ldflags "-s -w" -o bin/panelvps ./cmd/panelvps
 
 ### 一键安装
 
-服务器上一条命令，自动按架构选二进制、校验 SHA256、装服务：
+Debian 12 / Ubuntu 22.04+，amd64 与 arm64 均支持。自动判断架构、下载对应二进制、校验 SHA256、
+装好 systemd 服务，最后直接把初始密码打印出来。
 
 ```bash
-curl -fsSL https://<分发地址>/bootstrap.sh | sudo bash
+# 最新版
+curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/main/deploy/bootstrap.sh | sudo bash
 ```
 
-`bootstrap.sh` 支持三种来源，按优先级：
+生产环境建议锁定版本——脚本与二进制都取同一个 tag，不会因为 `main` 更新而错配：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.1.0/deploy/bootstrap.sh \
+    | sudo bash -s -- --ref v0.1.0
+```
+
+只体检、不安装（逐项报告能力，不改动系统）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/main/deploy/bootstrap.sh \
+    | sudo bash -s -- --check
+```
+
+`bootstrap.sh` 取文件的来源按优先级：
 
 | 来源 | 用法 | 适用 |
 |---|---|---|
-| `--base URL` | `--base https://dl.example.com/panelvps` | 私有仓库 / 国内网络，推荐 |
-| GitHub raw | 默认，`--repo` `--ref` 可覆盖 | 仓库公开且发布过 Release |
+| GitHub Release | 默认，`--ref` 可锁定 tag | 首选 |
+| `--base URL` | `--base https://dl.example.com/panelvps` | 国内访问 GitHub 慢，自建分发 |
 | 本地文件 | `sudo ./deploy/install.sh` | 已手工上传安装包 |
 
-**私有仓库不能直接用 raw 地址**：`raw.githubusercontent.com` 只认公开仓库，带 token 也拉不到。
-先跑一次发布脚本，把安装包推到自己的静态目录：
+国内机器拉 GitHub 超时时，用发布脚本把安装包推到自己有 HTTPS 的目录，再带 `--base` 安装：
 
 ```bash
 # 本机执行：交叉编译 → 生成 SHA256SUMS → 上传
 ./scripts/publish.sh root@1.2.3.4:/www/wwwroot/dl.example.com/panelvps \
     --base https://dl.example.com/panelvps
+
+# 目标机器
+curl -fsSL https://dl.example.com/panelvps/bootstrap.sh | sudo bash
 ```
 
-之后所有小鸡都能用同一条命令安装，也可以只体检：
+### 安装后访问
 
-```bash
-curl -fsSL https://dl.example.com/panelvps/bootstrap.sh | sudo bash -s -- --check
-```
-
-> 走 GitHub 公开路径需要先打 tag 并上传 Release 资产（`panelvps-linux-amd64`、`panelvps-linux-arm64`），
-> 仓库里不放二进制。这条路径尚未实测，本机环境无法访问 github.com。
-
-### 安装到服务器
-
-```bash
-sudo ./deploy/install.sh
-```
-
-安装后通过 SSH 隧道访问（推荐，面板不暴露公网）：
+面板默认只监听 `127.0.0.1:20873`，不暴露公网。用 SSH 隧道访问：
 
 ```bash
 ssh -L 20873:127.0.0.1:20873 root@<服务器IP>
+# 浏览器打开 http://127.0.0.1:20873
 ```
+
+确实需要公网直连时，改 `/opt/panelvps/conf/panel.yaml` 的 `listen`，
+但请同时配好防火墙与 TLS 反代——面板自己不做 HTTPS，裸奔的管理后台等于把 root 交出去。
 
 ### 在 LXC / 容器里安装
 
@@ -345,5 +358,14 @@ scripts/             构建、发布（publish.sh）与冒烟测试
 
 ## 许可
 
-待定。当前为私有仓库，未授予任何许可。
-实现遵循洁净室纪律，未复制 GPL 代码，因此将来可自由选择许可；详见 [PROVENANCE.md](PROVENANCE.md)。
+[Apache License 2.0](LICENSE)。可以商用、修改、闭源分发，需保留版权与许可声明，并附带 NOTICE 类声明；
+贡献者授予专利许可，同时不得用专利起诉本项目使用者。
+
+本项目采用洁净室实现，未复制 GPL 代码，因此许可选择不受上游传染；详见 [PROVENANCE.md](PROVENANCE.md)。
+
+## 参与
+
+- **安全问题**：请不要开 public issue，走 GitHub 的私有漏洞报告（Security → Report a vulnerability）
+- **功能与缺陷**：开 issue 时附上发行版、架构、`panelvps info` 输出与相关日志
+- **代码**：fork → 分支 → 提 PR；提交前跑 `go vet ./...`、`go test ./...`、`python -m py_compile scripts/smoke_test.py`
+
