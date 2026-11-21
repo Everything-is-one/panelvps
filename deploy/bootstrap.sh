@@ -105,28 +105,73 @@ fetch() {
     curl -fsSL --connect-timeout 10 --retry 3 --retry-delay 2 "$url" -o "$out" || return 1
 }
 
+# Release 资产的直链：指定 tag 时锁定该版本，否则跟随 latest
+gh_release_url() {
+    if [[ "$REF" == v* ]]; then
+        printf 'https://github.com/%s/releases/download/%s/%s' "$REPO" "$REF" "$1"
+    else
+        printf 'https://github.com/%s/releases/latest/download/%s' "$REPO" "$1"
+    fi
+}
+
+# 直链走 github.com，国内网络常被干扰（502 / 超时）；api.github.com 一般可达，
+# 公开仓库匿名即可读取资产，所以留一条 API 回退通道。
+fetch_via_api() {
+    local name="$1" out="$2" api json assets id
+    if [[ "$REF" == v* ]]; then
+        api="https://api.github.com/repos/$REPO/releases/tags/$REF"
+    else
+        api="https://api.github.com/repos/$REPO/releases/latest"
+    fi
+    # API 返回的是带缩进的 pretty JSON，先抹掉空白再做字段定位
+    json=$(curl -fsSL --connect-timeout 10 --retry 2 "$api" 2>/dev/null | tr -d ' \n\r\t') || return 1
+    [[ -n "$json" ]] || return 1
+    # 只保留 assets 数组，避免 release 正文里出现的同名字符串干扰
+    assets="${json#*\"assets\":\[}"
+    assets="${assets%%\]*}"
+    # 按 "{" 把数组切成对象，定位含目标文件名的那一个，再从同段取 id
+    id=$(printf '%s' "$assets" | tr '{' '\n' | grep -F "\"name\":\"$name\"" \
+        | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+    [[ -n "$id" ]] || return 1
+    curl -fsSL --connect-timeout 15 \
+        -H "Accept: application/octet-stream" \
+        "https://api.github.com/repos/$REPO/releases/assets/$id" -o "$out" \
+        || { rm -f "$out"; return 1; }
+    [[ -s "$out" ]]
+}
+
+# 先直链，失败再走 API
+fetch_release_asset() {
+    local name="$1" out="$2" url
+    url=$(gh_release_url "$name")
+    if curl -fsSL --connect-timeout 15 --retry 2 --retry-delay 2 "$url" -o "$out" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$out"
+    warn "直链不通（$url），改走 GitHub API"
+    fetch_via_api "$name" "$out"
+}
+
 # 二进制的来源：自建分发在 bin/ 下，GitHub 模式只能来自 Release（仓库里不放二进制）
 fetch_bin() {
-    local out="$TMP/bin/$BIN" url
+    local out="$TMP/bin/$BIN"
     mkdir -p "$TMP/bin"
-    if [[ -n "$BASE" ]]; then
-        url="${BASE%/}/bin/$BIN"
-    elif [[ -n "$TOKEN" ]]; then
-        die "私有仓库请用 --base 指定分发地址；GitHub Release 资产需要额外鉴权，不做支持"
-    elif [[ "$REF" == v* ]]; then
-        # 指定 tag 时锁定该版本的资产，脚本与二进制不会错配
-        url="https://github.com/$REPO/releases/download/$REF/$BIN"
-    else
-        url="https://github.com/$REPO/releases/latest/download/$BIN"
-    fi
     info "下载 $BIN"
-    curl -fsSL --connect-timeout 15 --retry 3 --retry-delay 2 "$url" -o "$out" \
-        || die "下载失败: $url（公开仓库需先发布 Release；否则请用 --base）"
+    if [[ -n "$BASE" ]]; then
+        curl -fsSL --connect-timeout 15 --retry 3 --retry-delay 2 \
+            "${BASE%/}/bin/$BIN" -o "$out" \
+            || die "下载失败: ${BASE%/}/bin/$BIN"
+    elif [[ -n "$TOKEN" ]]; then
+        die "私有仓库请用 --base 指定分发地址；Release 资产需要额外鉴权，不做支持"
+    else
+        fetch_release_asset "$BIN" "$out" \
+            || die "下载失败：直链与 API 均不可用。公开仓库需先发布 Release；否则请用 --base 指定自建分发"
+    fi
     chmod 0755 "$out"
 }
 
 # 校验清单也要按来源取：Release 资产不是仓库文件，raw 地址上没有它。
-# 取不到不算致命（本地构建/自定义分发可能没有），但要明确告诉用户校验被跳过。
+# 取不到不算致命（本地构建 / 自定义分发可能没有），但要明确告诉用户校验被跳过。
 fetch_sums() {
     local out="$TMP/SHA256SUMS"
     if [[ -n "$BASE" ]]; then
@@ -134,12 +179,8 @@ fetch_sums() {
             "${BASE%/}/SHA256SUMS" -o "$out" || return 1
     elif [[ -n "$TOKEN" ]]; then
         return 1
-    elif [[ "$REF" == v* ]]; then
-        curl -fsSL --connect-timeout 10 --retry 2 \
-            "https://github.com/$REPO/releases/download/$REF/SHA256SUMS" -o "$out" || return 1
     else
-        curl -fsSL --connect-timeout 10 --retry 2 \
-            "https://github.com/$REPO/releases/latest/download/SHA256SUMS" -o "$out" || return 1
+        fetch_release_asset "SHA256SUMS" "$out" || return 1
     fi
     [[ -s "$out" ]] || { rm -f "$out"; return 1; }
 }
