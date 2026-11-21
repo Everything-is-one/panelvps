@@ -1231,7 +1231,7 @@ function renderTerminalView(root) {
       clearBtn,
       status,
       dimLbl,
-      el("span", { class: "hint", text: "点击终端即可输入；Ctrl+C 中断，Ctrl+Shift+V 粘贴，选中即复制（HTTPS 下生效）" }),
+      el("span", { class: "hint", text: "以 root 运行，不需要 sudo（sudo 用的是 setuid 二进制，已被沙箱挡住）；Ctrl+C 中断，Ctrl+Shift+V 粘贴" }),
     ]),
     msg,
     host,
@@ -2010,6 +2010,7 @@ function renderSettingsView(root) {
       info.replaceChildren.apply(info, rows.map(([k, v]) =>
         el("tr", {}, [el("th", { text: k }), el("td", { class: "mono", text: String(v || "-") })])));
       paintUpdate(d.update);
+      loadUnit();
       if (FE_VERSION && p.version && p.version !== FE_VERSION) {
         const stale = el("div", { class: "msg err", style: "margin-bottom:12px" }, [
           el("span", { text: "当前页面用的是旧版前端（" + FE_VERSION + "），服务端已是 " + p.version + "，部分设置项可能显示不全。" }),
@@ -2048,6 +2049,46 @@ function renderSettingsView(root) {
       ]));
     }
     updateBox.replaceChildren.apply(updateBox, body);
+  };
+
+  // 服务单元自检：设置页的「版本更新」只替换二进制，不换 /etc/systemd 下的单元。
+  // 旧单元里的沙箱策略会挡住新功能（v0.3.5 之前装 Xray 报 read-only 就是这个）。
+  const unitBox = el("div", { class: "hint", text: "检查中…" });
+  const loadUnit = async () => {
+    let u;
+    try {
+      u = await api("GET", "/api/v1/system/unit");
+    } catch (e) {
+      unitBox.replaceChildren(el("div", { class: "hint", text: "无法读取服务单元状态：" + e.message }));
+      return;
+    }
+    if (!u.present) {
+      unitBox.replaceChildren(el("div", { class: "hint", text: u.reason || "未找到服务单元" }));
+      return;
+    }
+    if (u.match) {
+      unitBox.replaceChildren(el("div", { class: "row wrap" }, [
+        badge("与服务版本一致", "ok"),
+        el("span", { class: "hint mono", text: u.path }),
+      ]));
+      return;
+    }
+    unitBox.replaceChildren(
+      el("div", { class: "row wrap" }, [
+        badge("需要更新", "warn"),
+        el("span", { class: "hint mono", text: u.path }),
+      ]),
+      el("div", { class: "warn-box", style: "margin-top:10px", text: "磁盘上的单元是旧版本：升级只换了二进制，没换 systemd 单元。旧单元的沙箱策略会挡住新功能，比如软件商店装 Xray 报 read-only file system。" }),
+      el("div", { class: "row wrap", style: "margin-top:10px" }, [
+        el("button", { text: "用内置版本覆盖", onclick: async () => {
+          if (!confirm("将用当前版本内置的单元覆盖：\n" + u.path + "\n\n旧文件会先备份为 .bak-时间戳，然后执行 systemd daemon-reload。覆盖后需要重启面板才生效。")) return;
+          try {
+            const r = await api("POST", "/api/v1/system/unit/sync", {});
+            unitBox.replaceChildren(el("div", { class: "msg ok", text: (r.backup ? "已更新，旧单元备份在 " + r.backup + "。" : "已更新。") + "现在点下面的「重启面板」让它生效。" }));
+          } catch (e) { alert(e.message); }
+        } }),
+      ]),
+    );
   };
 
   const save = el("button", { text: "保存设置", onclick: async () => {
@@ -2107,6 +2148,7 @@ function renderSettingsView(root) {
       msg,
     ]),
     card("运行参数", [el("table", {}, [info])]),
+    card("服务单元", [unitBox]),
     card("版本更新", [
       el("div", { class: "row wrap" }, [
         el("button", { text: "检查更新", onclick: async () => {

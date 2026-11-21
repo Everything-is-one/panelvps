@@ -46,7 +46,7 @@ PanelVPS 把 VPS 上常做的几件事放进一个网页：看资源、改文件
 | 日志 | 面板 / Xray / SSH / Nginx / syslog 六个固定来源，可按行数尾部读取 |
 | 商店 | 12 个软件的声明式清单（列表 / 卡片两种视图），可预览每一步再安装，失败自动回滚 |
 | 备份 | 一键备份（含数据库一致性快照）、下载、恢复（二次确认 + 安全备份）、自动清理 |
-| 设置 | 访问方式与端口、重置密码、Web 终端开关、公网地址、告警 Webhook、SSH 防护、自更新 |
+| 设置 | 访问方式与端口、重置密码、Web 终端开关、公网地址、告警 Webhook、SSH 防护、自更新、服务单元自检 |
 
 界面为左侧导航 + 单列卡片，桌面与手机都能用。
 
@@ -97,8 +97,8 @@ curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/main/dep
 生产环境建议锁定版本，让脚本和二进制取同一个 tag，避免 `main` 更新后错配：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.3.5/deploy/bootstrap.sh \
-    | sudo bash -s -- --ref v0.3.5
+curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.3.6/deploy/bootstrap.sh \
+    | sudo bash -s -- --ref v0.3.6
 ```
 
 只体检、不安装（逐项报告能力，不改动系统）：
@@ -390,6 +390,15 @@ sudo mkdir -p /usr/local/share/xray && sudo systemctl restart panelvps
 
 升级到 v0.3.5+ 会重写单元、预创建常用目录，以上都不必手动做。
 `sudo ./install.sh --check` 可复核当前单元与目录状态。
+
+从 v0.3.6 起，「设置 → 服务单元」会比对磁盘上的单元与当前二进制内置的版本：
+不一致时显示「需要更新」，点「用内置版本覆盖」即可写入并 `daemon-reload`
+（旧文件备份为 `.bak-时间戳`），再点「重启面板」生效。这条路径解决的是
+**「设置 → 版本更新」只换二进制、不换 systemd 单元**的问题。
+
+注意：面板自带的 Web 终端不能用来修这类问题 —— 它是面板的子进程，继承同一份
+只读 mount namespace；`sudo` 也会失败（`setresuid(...): Operation not permitted`），
+因为单元里开了 `RestrictSUIDSGID`。终端本身已经是 root，不需要 `sudo`。
 
 装完之后才需要的操作，分两处：**网页在「设置」页**，**命令行敲 `panelvps` 进菜单**。
 不再单独占一个导航标签——控制页要拉 BBR 状态，打开得等一两秒，而这些操作本来一个月也用不上一次。

@@ -207,6 +207,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/system/services/{name}/actions/{action}", s.requireAuth(s.handleServiceAction))
 	s.mux.HandleFunc("GET /api/v1/system/ports", s.requireAuth(s.handlePorts))
 	s.mux.HandleFunc("POST /api/v1/system/restart", s.requireAuth(s.handleRestart))
+	s.mux.HandleFunc("GET /api/v1/system/unit", s.requireAuth(s.handleSystemUnit))
+	s.mux.HandleFunc("POST /api/v1/system/unit/sync", s.requireAuth(s.handleSystemUnitSync))
 	s.mux.HandleFunc("GET /api/v1/system/jobs", s.requireAuth(s.handleJobs))
 	s.mux.HandleFunc("GET /api/v1/system/jobs/{id}", s.requireAuth(s.handleJob))
 	s.mux.HandleFunc("GET /api/v1/audit", s.requireAuth(s.handleAuditList))
