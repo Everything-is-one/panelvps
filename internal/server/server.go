@@ -24,6 +24,7 @@ import (
 	"github.com/Everything-is-one/panelvps/internal/jobs"
 	"github.com/Everything-is-one/panelvps/internal/metrics"
 	"github.com/Everything-is-one/panelvps/internal/notify"
+	"github.com/Everything-is-one/panelvps/internal/relay"
 	"github.com/Everything-is-one/panelvps/internal/sites"
 	"github.com/Everything-is-one/panelvps/internal/softstore"
 	"github.com/Everything-is-one/panelvps/internal/store"
@@ -70,6 +71,7 @@ type Server struct {
 	backups  *backup.Manager
 	notifier *notify.Notifier
 	jobs     *jobs.Manager
+	relays   *relay.Manager
 
 	termMu     sync.Mutex
 	termTicket map[string]time.Time
@@ -174,6 +176,11 @@ func New(cfg *config.Config, st *store.Store, logger *slog.Logger) (*Server, err
 	s.jobs = jobs.New(60, 2)
 	s.termTicket = map[string]time.Time{}
 
+	// 中转规则随面板启动恢复。转发引擎不依赖 Xray，也不依赖任何外部
+	// 程序，所以这里可以同步启动：失败只影响对应规则，不会拖住面板。
+	s.relays = relay.New(logger)
+	s.reloadRelays(context.Background())
+
 	s.routes()
 	return s, nil
 }
@@ -202,6 +209,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/proxies/clients/{id}/reset", s.requireAuth(s.handleResetClientTraffic))
 	s.mux.HandleFunc("GET /api/v1/proxies/clients/{id}/links", s.requireAuth(s.handleClientLinks))
 	s.mux.HandleFunc("GET /api/v1/proxies/clients/{id}/qr", s.requireAuth(s.handleQR))
+
+	// 中转（端口转发）：与被代理的入站是两条独立链路
+	s.mux.HandleFunc("GET /api/v1/relays", s.requireAuth(s.handleRelayList))
+	s.mux.HandleFunc("POST /api/v1/relays", s.requireAuth(s.handleRelayCreate))
+	s.mux.HandleFunc("PATCH /api/v1/relays/{id}", s.requireAuth(s.handleRelayUpdate))
+	s.mux.HandleFunc("DELETE /api/v1/relays/{id}", s.requireAuth(s.handleRelayDelete))
+	s.mux.HandleFunc("POST /api/v1/relays/{id}/toggle", s.requireAuth(s.handleRelayToggle))
 
 	// 系统运维
 	s.mux.HandleFunc("GET /api/v1/system/info", s.requireAuth(s.handleSystemInfo))

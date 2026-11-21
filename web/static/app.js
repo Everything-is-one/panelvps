@@ -209,6 +209,7 @@ function renderChangePassword(forced) {
 const NAV_ICONS = {
   overview: "M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z",
   proxy: "M4 8h12l-3-3m3 3-3 3M20 16H8l3-3m-3 3 3 3",
+  relay: "M3 7h7v10H3zM14 7h7v10h-7zM10 12h4m-2-2 2 2-2 2",
   sites: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18m0 0c2.4 2.5 3.6 5.5 3.6 9s-1.2 6.5-3.6 9m0-18c-2.4 2.5-3.6 5.5-3.6 9s1.2 6.5 3.6 9M3.4 9h17.2M3.4 15h17.2",
   files: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
   terminal: "M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1m4 5 3 2.5L8 15m5 0h4",
@@ -220,7 +221,7 @@ const NAV_ICONS = {
 };
 
 const NAV_ITEMS = [
-  ["overview", "概览"], ["proxy", "代理"], ["sites", "网站"], ["files", "文件"],
+  ["overview", "概览"], ["proxy", "代理"], ["relay", "中转"], ["sites", "网站"], ["files", "文件"],
   ["terminal", "终端"], ["firewall", "防火墙"], ["logs", "日志"], ["store", "商店"],
   ["backup", "备份"], ["settings", "设置"],
 ];
@@ -228,6 +229,7 @@ const NAV_ITEMS = [
 const VIEW_META = {
   overview: ["概览", "资源占用、系统环境与常用入口"],
   proxy: ["代理", "Xray 入站、用户与订阅"],
+  relay: ["中转", "端口转发：把本机流量透传到目标地址"],
   sites: ["网站", "Nginx 站点与证书"],
   files: ["文件", "浏览、编辑服务器文件"],
   terminal: ["终端", "以 root 身份执行命令"],
@@ -316,6 +318,7 @@ function renderApp(view) {
 
   switch (state.view) {
     case "proxy": renderProxyView(content); break;
+    case "relay": renderRelayView(content); break;
     case "sites": renderSitesView(content); break;
     case "files": renderFilesView(content); break;
     case "terminal": renderTerminalView(content); break;
@@ -569,6 +572,7 @@ function inboundCard(ib, data, pageRoot) {
         }),
       ]),
       el("div", { class: "row" }, [
+        el("button", { class: "ghost", text: "编辑", onclick: () => inboundForm(pageRoot, ib) }),
         el("button", { class: "ghost", text: "复制链接", onclick: (ev) => copyInboundLink(ib, ev.target) }),
         el("button", { class: "ghost", text: "+ 用户", onclick: () => clientForm(ib, pageRoot) }),
         el("button", { class: "ghost", text: ib.enabled ? "停用" : "启用", onclick: () => toggleInbound(ib, pageRoot) }),
@@ -693,29 +697,37 @@ function randomPort() {
   return 20000 + Math.floor(Math.random() * 40000);
 }
 
-function inboundForm(root) {
-  const protocol = select(["vless", "vmess", "trojan", "shadowsocks"], "vless");
-  const network = select(["tcp", "ws", "grpc"], "tcp");
-  const security = select(["none", "tls", "reality"], "reality");
-  const listen = el("input", { value: "0.0.0.0" });
-  const port = el("input", { value: String(randomPort()), type: "number", min: "1", max: "65535", style: "flex:1;min-width:0" });
+function inboundForm(root, existing) {
+  const o = (existing && existing.options) || {};
+  const protocol = select(["vless", "vmess", "trojan", "shadowsocks"], existing ? existing.protocol : "vless");
+  const network = select(["tcp", "ws", "grpc"], existing ? existing.network : "tcp");
+  const security = select(["none", "tls", "reality"], existing ? existing.security : "reality");
+  const listen = el("input", { value: existing ? (existing.listen || "0.0.0.0") : "0.0.0.0" });
+  const port = el("input", {
+    type: "number", min: "1", max: "65535", style: "flex:1;min-width:0",
+    value: String(existing ? existing.port : randomPort()),
+  });
   const portRoll = el("button", {
     class: "ghost", text: "随机", style: "flex:0 0 auto",
     onclick: () => { port.value = String(randomPort()); },
   });
   const publicPort = el("input", {
-    value: "", type: "number", min: "1", max: "65535",
+    type: "number", min: "1", max: "65535",
+    value: existing && existing.public_port ? String(existing.public_port) : "",
     placeholder: "留空 = 与监听端口相同",
   });
-  const remark = el("input", { placeholder: "例如：东京节点" });
-  const dest = el("input", { value: "www.cloudflare.com:443", placeholder: "REALITY 伪装目标 host:port" });
-  const sni = el("input", { value: "www.cloudflare.com", placeholder: "serverNames，多个用逗号分隔" });
-  const wsPath = el("input", { value: "/", placeholder: "WebSocket 路径" });
-  const certFile = el("input", { placeholder: "/etc/ssl/fullchain.pem" });
-  const keyFile = el("input", { placeholder: "/etc/ssl/privkey.pem" });
+  const remark = el("input", { placeholder: "例如：东京节点", value: existing ? (existing.remark || "") : "" });
+  const dest = el("input", { value: o.dest || "www.cloudflare.com:443", placeholder: "REALITY 伪装目标 host:port" });
+  const sni = el("input", {
+    value: (o.server_names && o.server_names.length ? o.server_names.join(", ") : "www.cloudflare.com"),
+    placeholder: "serverNames，多个用逗号分隔",
+  });
+  const wsPath = el("input", { value: o.ws_path || "/", placeholder: "WebSocket 路径" });
+  const certFile = el("input", { value: o.cert_file || "", placeholder: "/etc/ssl/fullchain.pem" });
+  const keyFile = el("input", { value: o.key_file || "", placeholder: "/etc/ssl/privkey.pem" });
   const ssMethod = select([
     "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305",
-  ], "2022-blake3-aes-128-gcm");
+  ], o.method || "2022-blake3-aes-128-gcm");
   const msg = el("div", { class: "msg" });
 
   const realityBox = el("div", {}, [
@@ -747,10 +759,10 @@ function inboundForm(root) {
   [protocol, network, security].forEach((s) => s.addEventListener("change", syncVisible));
   syncVisible();
 
-  const submit = el("button", { text: "创建并入站", onclick: async () => {
+  const submit = el("button", { text: existing ? "保存" : "创建入站", onclick: async () => {
     submit.disabled = true;
     msg.className = "msg";
-    msg.textContent = "创建中…";
+    msg.textContent = existing ? "保存中…" : "创建中…";
     const options = {};
     if (security.value === "reality") {
       options.dest = dest.value.trim();
@@ -764,7 +776,7 @@ function inboundForm(root) {
     if (protocol.value === "shadowsocks") options.method = ssMethod.value;
 
     try {
-      const r = await api("POST", "/api/v1/proxies/inbounds", {
+      const body = {
         remark: remark.value.trim(),
         protocol: protocol.value,
         listen: listen.value.trim(),
@@ -773,7 +785,10 @@ function inboundForm(root) {
         network: network.value,
         security: security.value,
         options,
-      });
+      };
+      const r = existing
+        ? await api("PATCH", "/api/v1/proxies/inbounds/" + existing.id, body)
+        : await api("POST", "/api/v1/proxies/inbounds", body);
       const a = r.apply;
       if (a && !a.ok) {
         msg.className = "msg err";
@@ -790,7 +805,7 @@ function inboundForm(root) {
     }
   } });
 
-  const m = modal("新建入站", [
+  const m = modal(existing ? "编辑入站" : "新建入站", [
     field("备注", remark, "只影响显示与分享链接里的备注名"),
     field("协议", protocol),
     el("div", { class: "row" }, [
@@ -798,7 +813,7 @@ function inboundForm(root) {
       field("端口", el("div", { class: "row", style: "gap:6px" }, [port, portRoll]), "默认随机，被占用会提示换一个"),
     ]),
     field("对外端口", publicPort,
-      "NAT / 端口映射的机器才需要：商家把公网 30986 转发到容器内 47736 时填 30986，分享链接才会写公网端口。独立 IP 直接留空。"),
+      "只有 NAT / 端口映射的机器才要填：商家把公网 30986 转发到容器内 47736 时填 30986。独立 IP 或走 IPv6 时留空——填了会把错误端口写进分享链接。"),
     field("传输方式", network, "REALITY 选 tcp 或 grpc；ws 一般配合 CDN"),
     wsBox,
     field("安全类型", security, "reality 不需要证书，也最省事"),
@@ -1598,6 +1613,178 @@ function renderLogsView(root) {
     ]),
     msg, pre,
   ]));
+}
+
+// ---------- 中转 ----------
+
+function renderRelayView(root) {
+  const list = el("div", {});
+  const err = el("div", { class: "msg err" });
+  const total = el("div", { class: "mono muted" });
+
+  root.replaceChildren(
+    el("div", { class: "card section" }, [
+      el("h2", { text: "中转（端口转发）" }),
+      el("p", { class: "sub", text: "把本机端口收到的字节原样转发到目标地址。规则跑在「中转机」上——也就是你能直连的那台机器，通常和跑代理的机器不是同一台。" }),
+      el("p", { class: "sub", text: "协议内容全程透传：REALITY、TLS、gRPC 都不受影响，服务端不用改任何配置。客户端只要把地址换成中转机的地址和端口。" }),
+      el("p", { class: "hint", text: "命令行也能跑：panelvps relay -listen :8443 -to 目标IP:端口（不需要装面板、不建数据库）。" }),
+    ]),
+    el("div", { class: "card section" }, [
+      el("div", { class: "card-head" }, [
+        el("div", {}, [el("h2", { text: "规则" }), total]),
+        el("button", { class: "ghost", text: "+ 新建中转", onclick: () => relayForm(null, refresh) }),
+      ]),
+      list,
+    ]),
+    err,
+  );
+
+  const refresh = async () => {
+    try {
+      const data = await api("GET", "/api/v1/relays");
+      paintRelays(list, data.rules || []);
+      const sum = (data.rules || []).reduce((a, r) => ({
+        up: a.up + (r.stats.up || 0), down: a.down + (r.stats.down || 0),
+        active: a.active + (r.stats.active || 0),
+      }), { up: 0, down: 0, active: 0 });
+      total.textContent = "共 " + (data.rules || []).length + " 条 · 上行 " + fmtBytes(sum.up)
+        + " · 下行 " + fmtBytes(sum.down) + " · 活跃连接 " + sum.active;
+      err.textContent = "";
+    } catch (e) {
+      if (e.status === 401) { renderLogin("会话已失效，请重新登录"); return; }
+      err.textContent = e.message;
+    }
+  };
+
+  window.__relayRefresh = refresh;
+  refresh();
+  state.timer = setInterval(refresh, 5000);
+}
+
+function paintRelays(box, rules) {
+  if (!rules.length) {
+    box.replaceChildren(el("p", { class: "sub", text: "还没有中转规则。点击右上角「新建中转」开始。" }));
+    return;
+  }
+  box.replaceChildren.apply(box, rules.map(relayCard));
+}
+
+function relayCard(r) {
+  const st = r.stats || {};
+  const netLabel = r.network === "both" ? "TCP + UDP" : r.network.toUpperCase();
+  const statusBadge = r.enabled
+    ? (st.running ? badge("运行中", "ok") : badge("未监听", "warn"))
+    : badge("已停用", "warn");
+
+  const detail = el("div", { class: "mono muted" },
+    [el("span", { text: ":" + r.listen_port + " → " + r.target + "   " + netLabel
+      + "   ↑" + fmtBytes(st.up || 0) + " ↓" + fmtBytes(st.down || 0)
+      + "   连接 " + (st.active || 0) + " / " + (st.total || 0) })]);
+
+  const body = [
+    el("div", { class: "row" }, [
+      el("strong", { text: r.name || ("中转-" + r.listen_port) }),
+      statusBadge,
+    ]),
+    detail,
+  ];
+  if (st.last_error) {
+    body.push(el("div", { class: "hint", style: "color:var(--danger)", text: st.last_error }));
+  }
+
+  return el("div", { class: "inbound" }, [
+    el("div", { class: "inbound-head" }, [
+      el("div", {}, body),
+      el("div", { class: "row" }, [
+        el("button", { class: "ghost", text: "编辑", onclick: () => relayForm(r, () => window.__relayRefresh && window.__relayRefresh()) }),
+        el("button", {
+          class: "ghost", text: r.enabled ? "停用" : "启用",
+          onclick: () => toggleRelay(r),
+        }),
+        el("button", { class: "ghost danger", text: "删除", onclick: () => removeRelay(r) }),
+      ]),
+    ]),
+  ]);
+}
+
+async function toggleRelay(r) {
+  try {
+    await api("POST", "/api/v1/relays/" + r.id + "/toggle", {});
+    if (window.__relayRefresh) window.__relayRefresh();
+  } catch (e) {
+    modal("操作失败", [el("p", { class: "msg err", text: e.message })]);
+  }
+}
+
+async function removeRelay(r) {
+  const del = async () => {
+    await api("DELETE", "/api/v1/relays/" + r.id, {});
+    m.close();
+    if (window.__relayRefresh) window.__relayRefresh();
+  };
+  const delBtn = el("button", { class: "danger", text: "删除规则", onclick: async () => {
+    delBtn.disabled = true;
+    try { await del(); } catch (e) { msg.className = "msg err"; msg.textContent = e.message; delBtn.disabled = false; }
+  } });
+  const msg = el("div", { class: "msg" });
+  const m = modal("删除中转规则", [
+    el("p", { text: "确定删除「" + (r.name || r.listen_port) + "」吗？删除后监听端口会立即释放。" }),
+    el("div", { class: "row" }, [
+      el("button", { class: "ghost", text: "取消", onclick: () => m.close() }),
+      delBtn,
+    ]),
+    msg,
+  ]);
+}
+
+function relayForm(existing, after) {
+  const name = el("input", { placeholder: "例如：回家中转", value: existing ? (existing.name || "") : "" });
+  const listen = el("input", { value: existing ? (existing.listen || "0.0.0.0") : "0.0.0.0" });
+  const port = el("input", {
+    type: "number", min: "1", max: "65535",
+    value: existing ? String(existing.listen_port) : String(randomPort()),
+    style: "flex:1;min-width:0",
+  });
+  const roll = el("button", { class: "ghost", text: "随机", style: "flex:0 0 auto", onclick: () => { port.value = String(randomPort()); } });
+  const target = el("input", { placeholder: "目标IP:端口，例如 204.197.163.238:47736", value: existing ? (existing.target || "") : "" });
+  const network = select([["tcp", "TCP"], ["udp", "UDP"], ["both", "TCP + UDP"]], existing ? existing.network : "tcp");
+  const msg = el("div", { class: "msg" });
+
+  const submit = el("button", { text: existing ? "保存" : "创建", onclick: async () => {
+    submit.disabled = true;
+    msg.className = "msg";
+    msg.textContent = existing ? "保存中…" : "创建中…";
+    const body = {
+      name: name.value.trim(),
+      listen: listen.value.trim() || "0.0.0.0",
+      listen_port: parseInt(port.value, 10) || 0,
+      target: target.value.trim(),
+      network: network.value,
+    };
+    try {
+      if (existing) await api("PATCH", "/api/v1/relays/" + existing.id, body);
+      else await api("POST", "/api/v1/relays", body);
+      m.close();
+      if (after) after();
+    } catch (e) {
+      msg.className = "msg err";
+      msg.textContent = e.message;
+      submit.disabled = false;
+    }
+  } });
+
+  const m = modal(existing ? "编辑中转" : "新建中转", [
+    field("名称", name, "只影响显示"),
+    el("div", { class: "row" }, [
+      field("监听地址", listen, "0.0.0.0 = 全网卡（含 IPv6）"),
+      field("监听端口", el("div", { class: "row", style: "gap:6px" }, [port, roll]), "客户端连这个端口"),
+    ]),
+    field("目标地址", target, "中转机要能访问到的地址：host:port"),
+    field("协议", network, "代理流量选 TCP；游戏/UDP 应用才需要 UDP"),
+    el("div", { class: "hint", text: "填完后客户端连接「中转机 IP:监听端口」即可，协议的其余参数一律不变。" }),
+    submit,
+    msg,
+  ]);
 }
 
 // ---------- 网站 ----------

@@ -497,6 +497,34 @@ Xray 可执行文件按以下顺序探测：`PANELVPS_XRAY_BIN` 环境变量 →
 → `/usr/local/bin/xray` → `/usr/bin/xray` → 面板同目录 → `PATH`。
 找不到时面板照常启动，只是代理页显示「不可用」。
 
+## 中转（端口转发）
+
+面板左侧「中转」页可以把本机端口收到的字节原样转给另一台机器。它解决的是
+「目标机器本身不可达、但手上还有一台可达机器」的情况：在被墙的机器上跑代理，
+在可达的那台机器上加一条中转规则，客户端连中转机即可。
+
+```
+GET    /api/v1/relays              规则列表（含实时上下行与连接数）
+POST   /api/v1/relays              新建规则
+PATCH  /api/v1/relays/{id}         修改规则
+DELETE /api/v1/relays/{id}         删除规则
+POST   /api/v1/relays/{id}/toggle  启用 / 停用
+```
+
+规则字段：`name`、`listen`（IP，默认 `0.0.0.0`）、`listen_port`、`target`（`host:port`）、
+`network`（`tcp` / `udp` / `both`）。转发引擎不经过 Xray，改规则不会重启 Xray，
+不会掐断在线的代理连接；统计只存在内存里，面板重启后清零。
+
+中转机没有装面板也能用同一个二进制跑：
+
+```bash
+panelvps relay -listen :8443 -to 1.2.3.4:443        # 只转 TCP
+panelvps relay -listen :8443 -to 1.2.3.4:443 -udp   # TCP + UDP
+```
+
+协议内容全程透传（REALITY / TLS / gRPC 都不受影响），客户端只改地址与端口，
+其余参数不动。
+
 
 ## 目录结构
 
@@ -512,18 +540,19 @@ internal/
   logs/              固定来源的日志尾部读取、SSH 失败解析
   metrics/           /proc 指标采集
   notify/            Webhook 告警
+  relay/             TCP/UDP 端口转发（中转）引擎
   selfupdate/        GitHub release 检查、校验与替换
   server/            路由、中间件、API 处理器
   sites/             Nginx 站点渲染、校验、证书
   softstore/         声明式软件清单与安装器（manifests/*.yaml）
-  store/             SQLite 访问层与迁移（v1 认证 / v2 代理 / v3 运维）
+  store/             SQLite 访问层与迁移（v1 认证 / v2 代理 / v3 运维 / v4 对外端口 / v5 中转）
   sysinfo/           进程、服务、端口、网卡
   terminal/          PTY 会话
   version/           构建期注入的版本信息
   xray/              配置生成、进程托管、统计读取、分享链接与二维码
 web/                 embed 的前端静态资源（零构建原生 JS）
 deploy/              systemd 单元、容器覆盖、安装与一键引导脚本
-scripts/             构建、发布（publish.sh）与冒烟测试
+scripts/             构建、发布（publish.sh）、冒烟测试与中转 UI 自测
 ```
 
 ## 文档

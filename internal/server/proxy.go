@@ -152,7 +152,9 @@ type inboundReq struct {
 	Listen   string `json:"listen"`
 	Port     int    `json:"port"`
 	// PublicPort 是 NAT 映射出来的对外端口，0 表示与监听端口相同。
-	PublicPort int          `json:"public_port"`
+	// 用指针区分"没提交"（nil，沿用旧值）和"提交了 0"（清空）。
+	// 少了这个区分，走 IPv6 或独立 IP 的用户就永远清不掉建站时填的对外端口。
+	PublicPort *int `json:"public_port"`
 	Network    string       `json:"network"`
 	Security   string       `json:"security"`
 	Options    xray.Options `json:"options"`
@@ -329,11 +331,11 @@ func (s *Server) buildInbound(ctx context.Context, req inboundReq, prev *store.I
 		}
 		in.Port = p
 	}
-	if req.PublicPort != 0 {
-		if req.PublicPort < 1 || req.PublicPort > 65535 {
+	if req.PublicPort != nil {
+		if *req.PublicPort < 0 || *req.PublicPort > 65535 {
 			return nil, errors.New("对外端口必须在 1–65535 之间（留空表示与监听端口相同）")
 		}
-		in.PublicPort = req.PublicPort
+		in.PublicPort = *req.PublicPort
 	} else if prev == nil {
 		in.PublicPort = 0
 	}

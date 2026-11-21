@@ -18,17 +18,20 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/Everything-is-one/panelvps/internal/auth"
 	"github.com/Everything-is-one/panelvps/internal/config"
+	"github.com/Everything-is-one/panelvps/internal/relay"
 	"github.com/Everything-is-one/panelvps/internal/server"
 	"github.com/Everything-is-one/panelvps/internal/store"
 	"github.com/Everything-is-one/panelvps/internal/version"
@@ -51,6 +54,13 @@ func main() {
 		}
 	}
 
+	// 中转模式自己带一套参数，走独立分支：它不需要配置文件、不需要数据库，
+	// 在一台只当跳板的机器上直接跑起来即可。
+	if cmd == "relay" {
+		runRelayCmd(args)
+		return
+	}
+
 	fs := flag.NewFlagSet("panelvps "+cmd, flag.ExitOnError)
 	cfgPath := fs.String("config", defaultConfigPath(), "配置文件路径")
 	username := fs.String("user", "admin", "管理员用户名")
@@ -67,6 +77,8 @@ func main() {
   info              打印配置与账号概况
   init              创建管理员账号（已存在则跳过）
   reset-password    重置管理员密码为随机值
+  relay             前台运行一条端口转发（不需要配置文件与数据库）
+                    panelvps relay -listen :8443 -to 1.2.3.4:443 [-udp]
 
 不带命令直接运行 panelvps 会打开管理菜单；没有终端时按 serve 处理。
 
@@ -99,6 +111,77 @@ func main() {
 		fmt.Fprintln(os.Stderr, "错误:", err)
 		os.Exit(1)
 	}
+}
+
+// runRelayCmd 是独立的端口转发模式。
+//
+// 存在的意义：中转机上可能已经跑着宝塔、nginx 或别的东西，为了转一条 TCP
+// 专门装一套面板并不划算。这个子命令不读配置、不建库，一条命令就能起转发。
+func runRelayCmd(args []string) {
+	fs := flag.NewFlagSet("panelvps relay", flag.ExitOnError)
+	listen := fs.String("listen", ":8443", "本地监听地址，例如 :8443 或 0.0.0.0:8443")
+	to := fs.String("to", "", "目标地址 host:port，例如 1.2.3.4:443")
+	udp := fs.Bool("udp", false, "同时转发 UDP（默认只转 TCP）")
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, `panelvps relay —— 独立端口转发
+
+用法:
+  panelvps relay -listen :8443 -to 1.2.3.4:443 [-udp]
+
+参数:
+`)
+		fs.PrintDefaults()
+	}
+	_ = fs.Parse(args)
+
+	target := strings.TrimSpace(*to)
+	if target == "" {
+		fs.Usage()
+		os.Exit(2)
+	}
+	if _, _, err := net.SplitHostPort(target); err != nil {
+		fmt.Fprintln(os.Stderr, "错误: -to 要写成 主机:端口，例如 1.2.3.4:443")
+		os.Exit(2)
+	}
+
+	host, portStr, err := net.SplitHostPort(strings.TrimSpace(*listen))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "错误: -listen 不合法: %v\n", err)
+		os.Exit(2)
+	}
+	if host == "" {
+		host = "0.0.0.0"
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		fmt.Fprintln(os.Stderr, "错误: -listen 的端口必须在 1–65535 之间")
+		os.Exit(2)
+	}
+
+	network := "tcp"
+	if *udp {
+		network = "both"
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	m := relay.New(logger)
+	m.Apply([]relay.Rule{{
+		ID: 1, Name: "relay", Listen: host, ListenPort: port,
+		Target: target, Network: network, Enabled: true,
+	}})
+
+	st := m.Snapshot()[1]
+	if !st.Running {
+		fmt.Fprintln(os.Stderr, "错误: 监听失败:", st.LastError)
+		os.Exit(1)
+	}
+	fmt.Printf("中转已启动: %s -> %s (%s)\n按 Ctrl-C 停止。\n", net.JoinHostPort(host, portStr), target, network)
+
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+	<-ch
+	m.StopAll()
+	fmt.Println("已停止。")
 }
 
 // defaultConfigPath 优先使用安装目录下的配置，其次当前目录。

@@ -169,7 +169,12 @@ func (s *Store) migrate(ctx context.Context) error {
 		"public_port INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("补 inbounds.public_port 失败: %w", err)
 	}
-	for _, v := range []int{1, 2, 3, 4} {
+	// v5：中转（端口转发）规则。与入站分开建表：它不经过 Xray，
+	// 生命周期、端口冲突规则、统计口径都不一样。
+	if _, err := s.db.ExecContext(ctx, relaySchema); err != nil {
+		return fmt.Errorf("初始化中转表结构失败: %w", err)
+	}
+	for _, v := range []int{1, 2, 3, 4, 5} {
 		if _, err := s.db.ExecContext(ctx,
 			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(?, ?)`,
 			v, time.Now().Unix()); err != nil {
