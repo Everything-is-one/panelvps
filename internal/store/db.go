@@ -155,11 +155,16 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("初始化表结构失败: %w", err)
 	}
-	_, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?)`,
-		time.Now().Unix())
-	if err != nil {
-		return fmt.Errorf("写入迁移版本失败: %w", err)
+	// v2：代理模块（入站 / 客户端 / 流量游标与采样）
+	if _, err := s.db.ExecContext(ctx, proxySchema); err != nil {
+		return fmt.Errorf("初始化代理表结构失败: %w", err)
+	}
+	for _, v := range []int{1, 2} {
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(?, ?)`,
+			v, time.Now().Unix()); err != nil {
+			return fmt.Errorf("写入迁移版本失败: %w", err)
+		}
 	}
 	return nil
 }

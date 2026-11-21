@@ -16,6 +16,7 @@ import (
 	"github.com/Everything-is-one/panelvps/internal/config"
 	"github.com/Everything-is-one/panelvps/internal/metrics"
 	"github.com/Everything-is-one/panelvps/internal/store"
+	"github.com/Everything-is-one/panelvps/internal/xray"
 	"github.com/Everything-is-one/panelvps/web"
 )
 
@@ -47,6 +48,7 @@ type Server struct {
 	static   fs.FS
 	startAt  time.Time
 	dummyPwd string
+	xr       *xray.Manager
 }
 
 // New 构造 Server 并注册路由。
@@ -73,6 +75,15 @@ func New(cfg *config.Config, st *store.Store, logger *slog.Logger) (*Server, err
 		startAt:  time.Now(),
 		dummyPwd: dummy,
 	}
+
+	// Xray 不在也不影响面板启动：代理模块以「不可用」状态呈现，
+	// 运维功能照常工作。这比启动即失败更符合 1GB 小机器的现实。
+	bin, detectErr := xray.Detect(cfg.XrayBin)
+	if detectErr != nil {
+		logger.Warn("未探测到 Xray，代理功能不可用", "err", detectErr)
+	}
+	s.xr = xray.NewManager(bin, cfg.XrayConfDir, cfg.XrayAPIPort, "warning", logger)
+
 	s.routes()
 	return s, nil
 }
@@ -85,6 +96,22 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/auth/logout", s.requireAuth(s.handleLogout))
 	s.mux.HandleFunc("POST /api/v1/auth/password", s.requireAuth(s.handleChangePassword))
 	s.mux.HandleFunc("GET /api/v1/system/stat", s.requireAuth(s.handleSystemStat))
+
+	// 代理模块
+	s.mux.HandleFunc("GET /api/v1/proxies", s.requireAuth(s.handleProxiesOverview))
+	s.mux.HandleFunc("POST /api/v1/proxies/apply", s.requireAuth(s.handleApply))
+	s.mux.HandleFunc("POST /api/v1/proxies/traffic/collect", s.requireAuth(s.handleCollectTraffic))
+	s.mux.HandleFunc("PUT /api/v1/proxies/preferences", s.requireAuth(s.handleSavePrefs))
+	s.mux.HandleFunc("POST /api/v1/proxies/keys/reality", s.requireAuth(s.handleRealityKey))
+	s.mux.HandleFunc("POST /api/v1/proxies/inbounds", s.requireAuth(s.handleCreateInbound))
+	s.mux.HandleFunc("PATCH /api/v1/proxies/inbounds/{id}", s.requireAuth(s.handleUpdateInbound))
+	s.mux.HandleFunc("DELETE /api/v1/proxies/inbounds/{id}", s.requireAuth(s.handleDeleteInbound))
+	s.mux.HandleFunc("POST /api/v1/proxies/inbounds/{id}/clients", s.requireAuth(s.handleCreateClient))
+	s.mux.HandleFunc("PATCH /api/v1/proxies/clients/{id}", s.requireAuth(s.handleUpdateClient))
+	s.mux.HandleFunc("DELETE /api/v1/proxies/clients/{id}", s.requireAuth(s.handleDeleteClient))
+	s.mux.HandleFunc("POST /api/v1/proxies/clients/{id}/reset", s.requireAuth(s.handleResetClientTraffic))
+	s.mux.HandleFunc("GET /api/v1/proxies/clients/{id}/links", s.requireAuth(s.handleClientLinks))
+	s.mux.HandleFunc("GET /api/v1/proxies/clients/{id}/qr", s.requireAuth(s.handleQR))
 
 	// 兜底：静态资源与 SPA 入口
 	s.mux.HandleFunc("GET /", s.handleStatic)

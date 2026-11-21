@@ -150,12 +150,26 @@ func runServe(cfgPath string) error {
 		return err
 	}
 
+	// 恢复代理：配置存在则直接接管 Xray，不存在则生成一份空配置
+	srv.StartXray(context.Background())
+
 	// 后台维护任务：清理过期会话与限流表
 	go func() {
 		t := time.NewTicker(10 * time.Minute)
 		defer t.Stop()
 		for range t.C {
 			srv.Cleanup(context.Background())
+		}
+	}()
+
+	// 流量采样：一分钟一次，写入增量并做配额检查
+	go func() {
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for range t.C {
+			if err := srv.CollectTraffic(context.Background()); err != nil {
+				logger.Debug("采集流量失败", "err", err)
+			}
 		}
 	}()
 
@@ -206,6 +220,7 @@ func runServe(cfgPath string) error {
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("关闭失败: %w", err)
 	}
+	srv.StopXray()
 	logger.Info("已安全退出")
 	return nil
 }

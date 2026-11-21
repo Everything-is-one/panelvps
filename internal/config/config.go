@@ -43,6 +43,15 @@ type Config struct {
 	// TerminalEnabled 是否启用 Web 终端（默认关闭，显式开启）。
 	TerminalEnabled bool `yaml:"terminal_enabled"`
 
+	// XrayBin Xray 可执行文件路径；留空则自动探测。
+	XrayBin string `yaml:"xray_bin"`
+	// XrayConfDir Xray 配置目录，默认为 <data_dir>/xray。
+	XrayConfDir string `yaml:"xray_conf_dir"`
+	// XrayAPIPort 内部统计接口端口，仅监听 127.0.0.1。
+	XrayAPIPort int `yaml:"xray_api_port"`
+	// PublicHost 分享链接使用的公网地址或域名；留空时从访问来源推断。
+	PublicHost string `yaml:"public_host"`
+
 	// path 记录配置文件自身位置，便于回写默认配置。
 	path string
 }
@@ -61,6 +70,9 @@ func Default() *Config {
 		LogLevel:        "info",
 		FileRoot:        "/",
 		TerminalEnabled: false,
+		XrayBin:         "",
+		XrayAPIPort:     10085,
+		PublicHost:      "",
 	}
 }
 
@@ -112,6 +124,12 @@ func (c *Config) applyDefaults() {
 	if c.Listen == "" {
 		c.Listen = "127.0.0.1:20873"
 	}
+	if c.XrayAPIPort <= 0 || c.XrayAPIPort > 65535 {
+		c.XrayAPIPort = 10085
+	}
+	if c.XrayConfDir == "" {
+		c.XrayConfDir = "xray"
+	}
 }
 
 // Validate 做启动前校验，宁可启动失败也不要带病运行。
@@ -150,6 +168,9 @@ func (c *Config) Validate() error {
 	}
 	if !filepath.IsAbs(c.DBPath) {
 		c.DBPath = filepath.Join(c.DataDir, c.DBPath)
+	}
+	if !filepath.IsAbs(c.XrayConfDir) {
+		c.XrayConfDir = filepath.Join(c.DataDir, c.XrayConfDir)
 	}
 	return nil
 }
