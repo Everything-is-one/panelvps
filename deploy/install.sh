@@ -95,6 +95,17 @@ if ! systemctl is-active --quiet panelvps; then
     die "启动失败，请查看上面的日志"
 fi
 
+# 网站与证书依赖外部组件，缺了不影响面板启动，但要在安装时就说明白
+for pair in "nginx:/etc/nginx/conf.d" "certbot:/etc/letsencrypt"; do
+    bin="${pair%%:*}"
+    if ! command -v "$bin" >/dev/null 2>&1; then
+        info "未检测到 $bin —— 网站/证书功能需要它，可在面板「商店」里安装，或 apt install $bin"
+    fi
+done
+if [[ ! -d /etc/nginx/conf.d ]]; then
+    info "提示：/etc/nginx/conf.d 不存在时，站点下发会失败；装好 Nginx 后该目录会自动创建"
+fi
+
 # 首次安装会生成随机密码，日志里有
 PORT=$(grep -E '^listen:' "$CONF" | awk '{print $2}' | awk -F: '{print $2}')
 echo

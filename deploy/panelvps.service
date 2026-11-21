@@ -22,7 +22,14 @@ MemoryMax=192M
 # ---- 加固 ----
 # 整机只读，仅放行面板必须写入的目录
 ProtectSystem=strict
-ReadWritePaths=/opt/panelvps/data /opt/panelvps/conf /var/log /run
+# 注意：/etc/nginx/conf.d 与 /etc/nftables.d 必须可写，否则建站与防火墙下发会失败；
+# /etc/letsencrypt 与 /var/lib/letsencrypt 是 certbot 的工作目录；
+# /var/www 是站点根目录与 ACME 校验目录。
+# 前置 "-" 表示目录不存在时跳过，否则 systemd 会因挂载失败而拒绝启动。
+ReadWritePaths=-/opt/panelvps/data -/opt/panelvps/conf \
+               -/etc/nginx/conf.d -/etc/nftables.d \
+               -/etc/letsencrypt -/var/lib/letsencrypt -/var/log/letsencrypt \
+               -/var/www -/var/log -/run
 PrivateTmp=yes
 ProtectHome=read-only
 ProtectKernelTunables=yes
