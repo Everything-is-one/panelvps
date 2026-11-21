@@ -93,8 +93,8 @@ curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/main/dep
 生产环境建议锁定版本，让脚本和二进制取同一个 tag，避免 `main` 更新后错配：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.1.0/deploy/bootstrap.sh \
-    | sudo bash -s -- --ref v0.1.0
+curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.1.1/deploy/bootstrap.sh \
+    | sudo bash -s -- --ref v0.1.1
 ```
 
 只体检、不安装（逐项报告能力，不改动系统）：
