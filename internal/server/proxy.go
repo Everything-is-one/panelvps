@@ -154,7 +154,7 @@ type inboundReq struct {
 	// PublicPort 是 NAT 映射出来的对外端口，0 表示与监听端口相同。
 	// 用指针区分"没提交"（nil，沿用旧值）和"提交了 0"（清空）。
 	// 少了这个区分，走 IPv6 或独立 IP 的用户就永远清不掉建站时填的对外端口。
-	PublicPort *int `json:"public_port"`
+	PublicPort *int         `json:"public_port"`
 	Network    string       `json:"network"`
 	Security   string       `json:"security"`
 	Options    xray.Options `json:"options"`
