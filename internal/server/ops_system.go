@@ -14,9 +14,10 @@ import (
 // handleSystemInfo 返回主机概况与面板运行参数。
 func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{
-		"os":      sysinfo.Info(),
-		"cgroup":  sysinfo.CgroupVersion(),
-		"metrics": s.metrics.Collect(),
+		"os":       sysinfo.Info(),
+		"cgroup":   sysinfo.CgroupVersion(),
+		"timezone": systemTimezone(),
+		"metrics":  s.metrics.Collect(),
 		"panel": map[string]any{
 			"version":          version.Version,
 			"listen":           s.cfg.Listen,

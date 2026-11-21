@@ -402,7 +402,11 @@ plan:
 
 ---
 
-### M11 控制台与内核调优（P0，v0.3 补充）
+### M11 管理入口与内核调优（P0，v0.3 补充）
+
+> v0.3.2 起不再单独占一个「控制」导航：访问方式与账号并入「设置」，系统信息并入「概览」，
+> BBR 与重启只在命令行菜单里。控制页要拉 BBR 状态（`modprobe -n`），打开要等一两秒，
+> 而这些操作一个月也用不上一次，不值得占一个一级入口。
 
 装完之后的动作不该再回 SSH 翻配置文件，集中到「控制」页。
 
@@ -413,8 +417,10 @@ plan:
 | M11-03 | 重置密码 | 随机 20 位（仅返回一次）或自定义，复用同一套密码策略；成功后删除该账号全部会话 |
 | M11-04 | 重启 | 面板 / Xray / 服务器三档；重启服务器需 `confirm=REBOOT`，用 `systemctl --no-block` 不阻塞请求 |
 | M11-05 | BBR 开关 | 探测 `tcp_bbr`（可用列表或 `modprobe -n`）→ 写 `/etc/sysctl.d/99-panelvps.conf` → 交 helper 单元应用；关闭写回 `cubic` |
-| M11-06 | 系统信息 | 主机名、发行版、内核、架构、运行时长、时区、防火墙后端、Xray 状态 |
+| M11-06 | 系统信息 | 主机名、发行版、内核、架构、CPU 核数、时区、cgroup 版本；并入「概览」页 |
 | M11-07 | 命令行菜单 | `panelvps` 不带参数进菜单（无 TTY 时仍按 `serve`）：启停、状态、日志、监听与端口、重置密码、BBR、信息、重启服务器；安装脚本在 `/usr/local/bin` 建软链 |
+| M11-08 | Web 终端开关 | 设置页勾选即写入 `terminal_enabled` 并立即生效，不需要改配置文件和重启 |
+| M11-09 | 日志兜底 | 面板同时写 `<data_dir>/panel.log`（5MB 轮转）；日志页优先读它，绕开容器沙箱里读不到自身 journal 的问题 |
 
 ---
 
@@ -615,6 +621,34 @@ ExecStart=/sbin/sysctl -p /etc/sysctl.d/99-panelvps.conf
 | helper 不存在 | 退化为直接 `sysctl -p`（例如手工在终端跑二进制），仍失败则回滚文件 |
 | 卸载 | `install.sh --uninstall` 一并停用单元、删除 conf；BBR 在跑则先写回 `cubic` |
 | 失败回滚 | `sysctl -p` 失败时恢复原文件；已生效的内核参数留到下次重启自然恢复 |
+
+---
+
+### ADR-13 沙箱从 strict 退到 full：文件管理必须能写
+
+**问题**：v0.3.0 的主单元用 `ProtectSystem=strict` + `ReadWritePaths` 白名单，只放行了数据目录、
+`/etc/nginx/conf.d` 等几处。上线后用户在文件管理器里 `mkdir /home/aaa` 直接报
+`read-only file system`，上传同样失败——面板最核心的功能之一不可用。
+
+**被否掉的方案**：继续加白名单。`/home`、`/root`、`/srv`、`/mnt`、`/opt`、`/var` 都要写，
+加到等于没加，而且用户永远会在白名单外踩到只读。
+
+**采用方案**：`ProtectSystem=full`（继续保护 `/usr`、`/boot`、`/etc`），
+去掉 `ProtectHome=read-only` 与 `PrivateTmp`，`/etc` 下需要的子目录仍由 `ReadWritePaths` 精确放行。
+
+| 项 | 变化 | 理由 |
+|---|---|---|
+| `ProtectSystem` | strict → full | `/usr`、`/boot`、`/etc` 仍只读，挡住替换系统二进制这类持久化 |
+| `ProtectHome` | read-only → 取消 | 站点、备份、用户目录都在 `/home` 与 `/root` 下 |
+| `PrivateTmp` | yes → 取消 | 文件管理器看到的 `/tmp` 与 SSH 里不是同一个目录，上传完找不到文件 |
+| `MemoryMax` | 192M → 256M | Xray 是子进程，也吃同一份 cgroup 限额 |
+
+**为什么这不是「放弃加固」**：主单元是 `User=root` 且保留 `CAP_DAC_OVERRIDE`（读任意文件是设计的一部分），
+一个已经能改 `/etc/systemd/system` 和 `/usr/local/bin` 的进程，把 `/home` 设成只读并不能阻止它持久化。
+真正的边界是「不要把面板裸奔在公网」和「用强密码 / 二次验证」，而不是给文件管理加一把假锁。
+
+**代价**：面板进程被攻破后可以直接写 `/home` 与 `/root`。与其已有的能力相比没有实质变化，
+但确实少了「误操作影响系统盘」的一层缓冲。
 
 ---
 
@@ -835,7 +869,7 @@ backups(id, filename, size, kind, created_at)
 
 | 编号 | 要求 | 说明 |
 |---|---|---|
-| S-F01 | systemd 沙箱 | `ProtectSystem=strict`、`ReadWritePaths` 白名单、`PrivateTmp`、`ProtectHome=read-only`、`ProtectKernelTunables`、`RestrictSUIDSGID`、`LockPersonality`、`RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX` |
+| S-F01 | systemd 沙箱 | `ProtectSystem=full`（/usr、/boot、/etc 只读）、`ReadWritePaths` 放行 /etc 下的配置目录、`ProtectKernelTunables`、`RestrictSUIDSGID`、`LockPersonality`、`RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK` |
 | S-F02 | 权限收敛 | `CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN CAP_DAC_OVERRIDE CAP_KILL CAP_SETUID CAP_SETGID`；不用 `NoNewPrivileges`（会阻断子进程切换用户） |
 | S-F03 | 文件权限 | 私钥 / DB / 恢复码 0600，数据目录 0700，禁止 world-readable |
 | S-F04 | 发布完整性 | 二进制附 sha256 + minisign 签名；安装脚本先校验再执行 |
@@ -886,7 +920,7 @@ backups(id, filename, size, kind, created_at)
 | **M2 运维核心** | M2 监控、M5 文件、M6 终端、M4 防火墙、M7 日志、SSH 加固与封禁 | 10–12 人日 | 不开 SSH 能完成日常 90% 操作；爆破封禁生效 |
 | **M3 网站与商店** | M3 站点/证书/PHP、M8 软件商店（清单 + 安装编排） | 8–10 人日 | 静态站 + PHP 站跑通；商店装 nginx/redis 成功并可干净卸载 |
 | **M4 打磨** | M10 备份/导入导出/自更新、告警、紧急模式、签名发布、安装脚本、双语文案 | 5–7 人日 | 全新机器 5 分钟内装完可用，二进制可验签 |
-| **M5 控制台** | M11 访问方式与端口、重置密码、重启面板/Xray/服务器、BBR 开关与 helper 单元、命令行管理菜单 | 3–4 人日 | 浏览器或 `panelvps` 菜单都能把面板从本机切到公网，改完端口仍进得来 |
+| **M5 管理入口** | M11 访问方式与端口、重置密码、Web 终端开关、命令行菜单与 BBR helper 单元 | 4–5 人日 | 浏览器或 `panelvps` 菜单都能把面板从本机切到公网，改完端口仍进得来 |
 | 合计 | | **约 36–47 人日（7–9 周，单人业余）** | |
 
 > 估算是按「熟悉 Go + 熟悉 Linux 运维」的前提给的，不含反复调 Xray 配置的踩坑时间。**M1 是最可能超期的一段**。
@@ -933,7 +967,7 @@ backups(id, filename, size, kind, created_at)
 - [ ] 一键禁 SSH 密码登录：无公钥时被拒绝执行
 - [ ] SSH 改端口后旧端口保留 5 分钟，防火墙规则同步
 - [ ] 模拟端口扫描（60s 内连 20 个端口）后，源 IP 进入 ban set 并自动解封
-- [ ] `ProtectSystem=strict` 下写 `/usr` 失败、写 `/opt/panelvps/data` 成功
+- [ ] `ProtectSystem=full` 下写 `/usr/bin` 失败、写 `/home` 与 `/opt/panelvps/data` 成功
 - [ ] 反代目标填 `http://169.254.169.254` 被 SSRF 黑名单拦截
 
 ---

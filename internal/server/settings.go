@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Everything-is-one/panelvps/internal/config"
+	"github.com/Everything-is-one/panelvps/internal/manage"
 	"github.com/Everything-is-one/panelvps/internal/notify"
 	"github.com/Everything-is-one/panelvps/internal/selfupdate"
 	"github.com/Everything-is-one/panelvps/internal/version"
@@ -40,9 +43,37 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 			threshold = n
 		}
 	}
+	// 访问方式与账号原先在「控制」页，那里为了拿 BBR 状态要跑 modprobe，
+	// 整个页面要等一两秒。设置页不需要 BBR，这里只算地址。
+	listenPort := 0
+	if _, p, err := net.SplitHostPort(s.cfg.Listen); err == nil {
+		if n, err := strconv.Atoi(p); err == nil {
+			listenPort = n
+		}
+	}
+	public := !s.cfg.IsLoopback()
+	access := map[string]any{
+		"port":      listenPort,
+		"public":    public,
+		"listen":    s.cfg.Listen,
+		"urls":      manage.AccessURLs(s.accessHosts(r), listenPort, public),
+		"local_ips": manage.LocalIPv4s(),
+	}
+	account := map[string]any{}
+	if u, _, err := s.currentUser(r); err == nil && u != nil {
+		v := toUserView(u)
+		account = map[string]any{
+			"username":      v.Username,
+			"last_login_at": v.LastLoginAt,
+			"last_login_ip": v.LastLoginIP,
+		}
+	}
+
 	ok(w, map[string]any{
 		"public_host":   s.publicHost(r),
 		"alert_webhook": s.cfg.AlertWebhook,
+		"access":        access,
+		"account":       account,
 		"ssh_guard": map[string]any{
 			"enabled":   guardOn,
 			"threshold": threshold,
@@ -71,10 +102,11 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 }
 
 type settingsReq struct {
-	PublicHost   *string `json:"public_host"`
-	AlertWebhook *string `json:"alert_webhook"`
-	SSHGuard     *bool   `json:"ssh_guard_enabled"`
-	SSHThreshold *int    `json:"ssh_guard_threshold"`
+	PublicHost      *string `json:"public_host"`
+	AlertWebhook    *string `json:"alert_webhook"`
+	SSHGuard        *bool   `json:"ssh_guard_enabled"`
+	SSHThreshold    *int    `json:"ssh_guard_threshold"`
+	TerminalEnabled *bool   `json:"terminal_enabled"`
 }
 
 func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) {
@@ -142,10 +174,24 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) {
 		changed = append(changed, "ssh_guard_threshold")
 	}
 
+	if req.TerminalEnabled != nil {
+		if s.cfg.Path() == "" {
+			fail(w, http.StatusInternalServerError, codeInternalError, "无法定位配置文件")
+			return
+		}
+		if err := config.PatchScalar(s.cfg.Path(), "terminal_enabled",
+			strconv.FormatBool(*req.TerminalEnabled)); err != nil {
+			fail(w, http.StatusInternalServerError, codeInternalError, "写入配置文件失败: "+err.Error())
+			return
+		}
+		// 终端开关是每次请求现读 s.cfg，改完立即生效，不需要重启面板
+		s.cfg.TerminalEnabled = *req.TerminalEnabled
+		changed = append(changed, "terminal_enabled")
+	}
+
 	s.audit(r, "settings_update", strings.Join(changed, ","), "")
 	ok(w, map[string]any{"changed": changed})
 }
-
 func (s *Server) cachedUpdate() *updateInfo {
 	s.updMu.Lock()
 	defer s.updMu.Unlock()

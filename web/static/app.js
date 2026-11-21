@@ -228,7 +228,7 @@ function renderApp(view) {
   ]);
 
   const nav = el("div", { class: "tabs" }, [
-    navBtn("overview", "概览"), navBtn("control", "控制"), navBtn("proxy", "代理"),
+    navBtn("overview", "概览"), navBtn("proxy", "代理"),
     navBtn("sites", "网站"), navBtn("files", "文件"), navBtn("terminal", "终端"),
     navBtn("firewall", "防火墙"), navBtn("logs", "日志"), navBtn("store", "商店"),
     navBtn("backup", "备份"), navBtn("settings", "设置"),
@@ -239,7 +239,6 @@ function renderApp(view) {
   app().replaceChildren(head, nav, content);
 
   switch (state.view) {
-    case "control": renderControlView(content); break;
     case "proxy": renderProxyView(content); break;
     case "sites": renderSitesView(content); break;
     case "files": renderFilesView(content); break;
@@ -259,14 +258,38 @@ function renderOverviewView(root) {
   const banner = el("div", { class: "banner", text: "", style: "display:none" });
   const grid = el("div", { class: "grid" });
   const infoBody = el("tbody");
+  const sysBody = el("tbody");
   const status = el("div", { class: "msg" });
 
   root.replaceChildren(
     banner,
     grid,
     el("div", { class: "card section" }, [el("h2", { text: "面板信息" }), el("table", {}, [infoBody])]),
+    el("div", { class: "card section" }, [el("h2", { text: "系统环境" }), el("table", {}, [sysBody])]),
     status,
   );
+
+  // 主机信息基本不变，只取一次；资源指标才需要轮询
+  const loadHost = async () => {
+    try {
+      const d = await api("GET", "/api/v1/system/info");
+      const o = d.os || {};
+      const rows = [
+        ["主机名", o.hostname],
+        ["发行版", o.distro],
+        ["内核", o.kernel],
+        ["架构", o.arch],
+        ["CPU 核数", o.cpu_cores ? String(o.cpu_cores) : "-"],
+        ["时区", d.timezone || "-"],
+        ["运行环境", d.cgroup ? "cgroup " + d.cgroup : "-"],
+      ];
+      sysBody.replaceChildren.apply(sysBody, rows.map(([k, v]) =>
+        el("tr", {}, [el("th", { text: k }), el("td", { class: "mono", text: String(v || "-") })])));
+    } catch (e) {
+      if (e.status === 401) { renderLogin("会话已失效，请重新登录"); return; }
+      sysBody.replaceChildren(el("tr", {}, [el("td", { text: e.message })]));
+    }
+  };
 
   const refresh = async () => {
     try {
@@ -306,6 +329,7 @@ function renderOverviewView(root) {
     }
   };
 
+  loadHost();
   refresh();
   state.timer = setInterval(refresh, 3000);
 }
@@ -1029,7 +1053,10 @@ function renderTerminalView(root) {
     ]),
     msg,
     out,
-    el("div", { class: "hint", text: "终端默认关闭。启用方式：配置 terminal_enabled: true 后重启面板。会话最长 30 分钟，同时最多 2 个。" }),
+    el("div", { class: "row wrap" }, [
+      el("span", { class: "hint", text: "终端默认关闭，到「设置 → 基本设置」勾选「启用 Web 终端」即可生效，不用重启。会话最长 30 分钟，同时最多 2 个。" }),
+      el("button", { class: "ghost", text: "去设置", onclick: () => renderApp("settings") }),
+    ]),
   ]));
   setTimeout(connect, 100);
 }
@@ -1354,19 +1381,37 @@ function siteForm(reload, meta) {
 function renderStoreView(root) {
   const search = el("input", { placeholder: "搜索软件…", style: "max-width:240px" });
   const cat = select([["", "全部类别"]], "");
+  const viewSel = select([["list", "列表"], ["card", "卡片"]], localStorage.getItem("pv-store-view") || "list");
   const grid = el("div", { class: "grid g2" });
+  const listBox = el("div", { class: "table-wrap" });
   const msg = el("div", { class: "msg" });
   let all = [];
   let supported = true;
 
-  const paint = () => {
+  const matches = () => {
     const q = search.value.trim().toLowerCase();
     const c = cat.value;
-    const items = all.filter((m) =>
+    return all.filter((m) =>
       (!c || m.category === c) &&
       (!q || (m.name + " " + m.slug + " " + m.summary).toLowerCase().includes(q)));
-    if (!items.length) { grid.replaceChildren(emptyHint("没有匹配的软件")); return; }
-    grid.replaceChildren.apply(grid, items.map((m) => storeCard(m, supported, () => load())));
+  };
+
+  const paint = () => {
+    const items = matches();
+    const listMode = viewSel.value === "list";
+    grid.style.display = listMode ? "none" : "";
+    listBox.style.display = listMode ? "" : "none";
+    localStorage.setItem("pv-store-view", viewSel.value);
+    if (!items.length) {
+      grid.replaceChildren(emptyHint("没有匹配的软件"));
+      listBox.replaceChildren(emptyHint("没有匹配的软件"));
+      return;
+    }
+    if (listMode) {
+      listBox.replaceChildren(storeTable(items, supported, () => load()));
+    } else {
+      grid.replaceChildren.apply(grid, items.map((m) => storeCard(m, supported, () => load())));
+    }
   };
 
   const load = async () => {
@@ -1390,19 +1435,47 @@ function renderStoreView(root) {
 
   search.addEventListener("input", paint);
   cat.addEventListener("change", paint);
+  viewSel.addEventListener("change", paint);
 
   root.replaceChildren(card("软件商店", [
-    el("div", { class: "hint", text: "清单是声明式的（apt / 下载 / 解压 / 写文件 / 路径 / 服务 / 校验），不含自由脚本。安装会真实调用 apt，可能需要几分钟。" }),
-    el("div", { class: "row wrap" }, [search, cat, el("button", { class: "ghost", text: "刷新", onclick: load })]),
-    msg, grid,
+    el("div", { class: "hint", text: "清单是声明式的（apt / 下载 / 解压 / 写文件 / 路径 / 服务 / 校验），不含自由脚本。安装会真实调用 apt 或下载二进制，可能需要几分钟。" }),
+    el("div", { class: "row wrap" }, [search, cat, viewSel,
+      el("button", { class: "ghost", text: "刷新", onclick: load })]),
+    msg, listBox, grid,
   ]));
   load();
 }
 
+// storeTable 用表格展示，适合一眼扫过全部软件与安装状态。
+function storeTable(items, supported, reload) {
+  const head = el("tr", {}, ["软件", "类别", "说明", "内存", "磁盘", "状态", "操作"]
+    .map((h) => el("th", { text: h })));
+  const rows = items.map((m) => {
+    const acts = storeActions(m, supported, reload);
+    return el("tr", {}, [
+      el("td", {}, [
+        el("div", { text: m.name }),
+        el("div", { class: "hint mono", text: m.slug + " · " + m.version }),
+      ]),
+      el("td", { text: m.category || "-" }),
+      el("td", { class: "sub", text: m.summary }),
+      el("td", { class: "mono", text: m.memory_mb + "MB" }),
+      el("td", { class: "mono", text: m.disk_mb + "MB" }),
+      el("td", {}, [
+        m.installed
+          ? badge(m.installed_version ? "已装 " + m.installed_version : "已安装", "ok")
+          : badge(riskText[m.risk] || m.risk, m.risk === "high" ? "err" : m.risk === "medium" ? "warn" : "muted"),
+      ]),
+      el("td", {}, [el("div", { class: "row wrap" }, acts)]),
+    ]);
+  });
+  return el("table", { class: "store-table" }, [el("thead", {}, [head]), el("tbody", {}, rows)]);
+}
+
 const riskText = { low: "低风险", medium: "中风险", high: "高风险" };
 
-function storeCard(m, supported, reload) {
-  const acts = el("div", { class: "row wrap" }, [
+function storeActions(m, supported, reload) {
+  const acts = [
     el("button", { class: "ghost", text: "查看步骤", onclick: async () => {
       try {
         const d = await api("GET", "/api/v1/store/" + m.slug + "/plan?mode=install");
@@ -1413,10 +1486,10 @@ function storeCard(m, supported, reload) {
         ]);
       } catch (e) { alert(e.message); }
     } }),
-  ]);
+  ];
 
   if (m.installed) {
-    acts.appendChild(el("button", { class: "ghost danger", text: "卸载", onclick: async () => {
+    acts.push(el("button", { class: "ghost danger", text: "卸载", onclick: async () => {
       if (!confirm("卸载 " + m.name + "？会停止服务并 purge 相关软件包。")) return;
       try {
         const job = await api("POST", "/api/v1/store/" + m.slug + "/uninstall", {});
@@ -1424,7 +1497,7 @@ function storeCard(m, supported, reload) {
       } catch (e) { alert(e.message); }
     } }));
   } else {
-    acts.appendChild(el("button", { text: supported ? "安装" : "仅 Linux 可安装", onclick: async () => {
+    acts.push(el("button", { text: supported ? "安装" : "仅 Linux 可安装", onclick: async () => {
       if (!supported) return alert("软件商店仅能在 Linux 服务器上执行安装");
       if (m.risk === "high" && !confirm("该软件标记为高风险：" + (m.warning || "") + "\n\n仍要继续？")) return;
       else if (m.risk !== "high" && !confirm("安装 " + m.name + "？预计占用内存 " + m.memory_mb + "MB。")) return;
@@ -1434,6 +1507,11 @@ function storeCard(m, supported, reload) {
       } catch (e) { alert(e.message); }
     } }));
   }
+  return acts;
+}
+
+function storeCard(m, supported, reload) {
+  const acts = el("div", { class: "row wrap" }, storeActions(m, supported, reload));
 
   return el("div", { class: "card store-card" }, [
     el("div", { class: "row spread" }, [
@@ -1522,8 +1600,110 @@ function renderSettingsView(root) {
   const webhook = el("input", { placeholder: "https://example.com/webhook" });
   const guard = el("input", { type: "checkbox" });
   const threshold = el("input", { placeholder: "5", style: "max-width:100px" });
+  const terminalChk = el("input", { type: "checkbox" });
   const info = el("tbody");
   const updateBox = el("div");
+
+  // 访问方式（原「控制」页，收进设置）
+  const accessPort = el("input", { type: "number", min: "1", max: "65535", style: "max-width:130px" });
+  const accessPublic = el("input", { type: "checkbox" });
+  const accessInfo = el("div");
+  const accessMsg = el("div", { class: "msg" });
+
+  // 账号
+  const accountBox = el("div");
+
+  const paintAccess = (a) => {
+    accessPort.value = a.port ? String(a.port) : "";
+    accessPublic.checked = !!a.public;
+    const kids = [
+      el("div", { class: "row wrap" }, [
+        badge(a.public ? "外网可访问" : "仅本机", a.public ? "warn" : "ok"),
+        el("span", { class: "mono", text: a.listen || "-" }),
+      ]),
+    ];
+    (a.urls || []).forEach((u) => kids.push(el("div", { style: "margin-top:6px" }, [
+      el("a", { class: "mono", href: u, target: "_blank", rel: "noreferrer", text: u }),
+    ])));
+    if (!(a.urls || []).length && a.public) {
+      kids.push(el("div", { class: "hint", text: "没有探测到可用地址，请用服务器公网 IP:" + a.port }));
+    }
+    if ((a.local_ips || []).length) {
+      kids.push(el("div", { class: "hint", text: "本机网卡地址：" + a.local_ips.join("、") }));
+    }
+    kids.push(a.public
+      ? el("div", { class: "banner", style: "margin-top:12px", text: "面板对外开放，而且只提供 HTTP。请使用强密码，并确认云厂商安全组放行了 " + a.port + "/tcp。" })
+      : el("div", { class: "hint", text: "只监听 127.0.0.1，需要通过 SSH 隧道访问。" }));
+    accessInfo.replaceChildren.apply(accessInfo, kids);
+  };
+
+  const saveAccess = async () => {
+    const port = parseInt(accessPort.value, 10);
+    if (!port || port < 1 || port > 65535) {
+      accessMsg.className = "msg err"; accessMsg.textContent = "端口应在 1–65535 之间"; return;
+    }
+    const pub = accessPublic.checked;
+    if (!confirm("面板会重启，当前页面断开约 3 秒。" + (pub ? "" : "\n改为仅本机后，只能通过 SSH 隧道访问。"))) return;
+    accessMsg.className = "msg"; accessMsg.textContent = "保存中…";
+    try {
+      const r = await api("PUT", "/api/v1/control/access", { port, public: pub, confirm: "ACCESS" });
+      const extra = (r.warnings || []).length ? " " + r.warnings.join("；") : "";
+      accessMsg.className = "msg ok";
+      accessMsg.textContent = "已保存" + (r.restarting ? "，面板重启中…" : "") + extra;
+      if (!r.restarting) return;
+      const h = location.hostname;
+      if (r.public && location.protocol === "http:" && h !== "127.0.0.1" && h !== "localhost" && h !== "::1") {
+        setTimeout(() => { location.href = location.protocol + "//" + h + ":" + r.port + "/"; }, 4500);
+      } else if (!r.public) {
+        accessMsg.textContent = "已保存，服务重启后请通过 SSH 隧道访问 127.0.0.1:" + r.port;
+      }
+    } catch (e) {
+      accessMsg.className = "msg err"; accessMsg.textContent = e.message;
+    }
+  };
+
+  const showPasswordModal = (pwd) => {
+    const input = el("input", { readonly: true, class: "mono" });
+    input.value = pwd;
+    const m = modal("新密码（只显示一次）", [
+      el("div", { class: "hint", text: "请立即保存。关闭后无法再次查看，只能重新重置。" }),
+      input,
+      el("div", { class: "row wrap", style: "margin-top:12px" }, [
+        el("button", { text: "复制", onclick: async () => {
+          try { await navigator.clipboard.writeText(pwd); }
+          catch (_) { input.select(); document.execCommand("copy"); }
+        } }),
+        el("button", { class: "ghost", text: "我已保存，去登录", onclick: () => m.close() }),
+      ]),
+    ], () => {
+      state.user = null;
+      renderLogin("密码已重置，请用新密码登录");
+    });
+  };
+
+  const resetRandom = async () => {
+    if (!confirm("生成新的随机密码，并踢掉所有已登录会话？")) return;
+    try {
+      const r = await api("POST", "/api/v1/control/password", { mode: "random", confirm: "RESET" });
+      showPasswordModal(r.password);
+    } catch (e) { alert(e.message); }
+  };
+
+  const paintAccount = (a) => {
+    accountBox.replaceChildren(
+      el("div", { class: "row wrap" }, [
+        badge(a.username || "admin", "plain"),
+        el("span", { class: "hint", text: a.last_login_at
+          ? "上次登录 " + fmtTime(a.last_login_at) + (a.last_login_ip ? " · " + a.last_login_ip : "")
+          : "还没有登录记录" }),
+      ]),
+      el("div", { class: "row wrap", style: "margin-top:12px" }, [
+        el("button", { text: "重置为随机密码", onclick: resetRandom }),
+        el("button", { class: "ghost", text: "修改密码（需旧密码）", onclick: () => renderChangePassword(false) }),
+      ]),
+      el("div", { class: "hint", text: "重置会立即踢掉所有会话，新密码只显示一次。" }),
+    );
+  };
 
   const load = async () => {
     try {
@@ -1532,7 +1712,10 @@ function renderSettingsView(root) {
       webhook.value = d.alert_webhook || "";
       guard.checked = !!(d.ssh_guard && d.ssh_guard.enabled);
       threshold.value = d.ssh_guard ? d.ssh_guard.threshold : 5;
+      paintAccess(d.access || {});
+      paintAccount(d.account || {});
       const p = d.panel || {};
+      terminalChk.checked = !!p.terminal_enabled;
       const rows = [
         ["面板版本", p.version], ["监听地址", p.listen + (p.loopback ? "（仅本机）" : "（对外）")],
         ["数据目录", p.data_dir], ["数据库", p.db_path],
@@ -1586,6 +1769,7 @@ function renderSettingsView(root) {
         alert_webhook: webhook.value.trim(),
         ssh_guard_enabled: guard.checked,
         ssh_guard_threshold: parseInt(threshold.value, 10) || 5,
+        terminal_enabled: terminalChk.checked,
       });
       msg.className = "msg ok";
       msg.textContent = "已保存";
@@ -1607,12 +1791,29 @@ function renderSettingsView(root) {
   } });
 
   root.replaceChildren(
+    card("访问方式", [
+      accessInfo,
+      el("label", { class: "row", style: "margin-top:12px" }, [
+        accessPublic, el("span", { text: "允许通过 IP + 端口访问" }),
+      ]),
+      el("label", { class: "row", style: "margin-top:8px" }, [
+        el("span", { text: "端口" }), accessPort,
+        el("span", { class: "hint", text: "1–65535，保存后面板自动重启" }),
+      ]),
+      el("div", { class: "row wrap", style: "margin-top:6px" }, [
+        el("button", { text: "保存并重启面板", onclick: saveAccess }),
+      ]),
+      accessMsg,
+    ]),
+    card("账号", [accountBox]),
     card("基本设置", [
       field("公网地址", host, "用于生成分享链接；可填 IP 或域名"),
       field("告警 Webhook", webhook, "留空则关闭。事件以 JSON POST 推送，5 分钟内相同标题只发一次"),
       el("label", { class: "row" }, [guard, el("span", { text: "启用 SSH 爆破自动封禁" })]),
-      field("失败次数阈值", threshold, "窗口 " + "10 分钟（配置项 ssh_guard_window）"),
-      el("div", { class: "row wrap" }, [save, restart]),
+      field("失败次数阈值", threshold, "窗口 10 分钟（配置项 ssh_guard_window）"),
+      el("label", { class: "row", style: "margin-top:8px" }, [terminalChk, el("span", { text: "启用 Web 终端" })]),
+      el("div", { class: "hint", text: "打开后立即生效，不需要重启；写入配置文件 terminal_enabled。终端以 root 身份执行命令，请确保面板本身足够安全。" }),
+      el("div", { class: "row wrap", style: "margin-top:10px" }, [save, restart]),
       msg,
     ]),
     card("运行参数", [el("table", {}, [info])]),
@@ -1629,251 +1830,6 @@ function renderSettingsView(root) {
     ]),
   );
   load();
-}
-
-// ---------- 控制 ----------
-
-function renderControlView(root) {
-  const msg = el("div", { class: "msg" });
-  const accessBox = el("div");
-  const accountBox = el("div");
-  const bbrBox = el("div");
-  const serviceBox = el("div");
-  const sysBody = el("tbody");
-  const portInput = el("input", { type: "number", min: "1", max: "65535", style: "max-width:130px" });
-  const publicChk = el("input", { type: "checkbox" });
-
-  const show = (text, kind) => {
-    msg.className = "msg" + (kind ? " " + kind : "");
-    msg.textContent = text;
-  };
-
-  const setBBR = async (enabled) => {
-    if (!confirm(enabled ? "开启 BBR？会写入 sysctl 配置并立即生效。" : "关闭 BBR，切回 cubic？")) return;
-    show("正在应用…");
-    try {
-      const r = await api("POST", "/api/v1/control/bbr", { enabled, confirm: "BBR" });
-      paintBBR(r.bbr || {});
-      show(enabled ? "BBR 已开启" : "BBR 已关闭", "ok");
-    } catch (e) {
-      show(e.message, "err");
-    }
-  };
-
-  const setAccess = async () => {
-    const port = parseInt(portInput.value, 10);
-    if (!port || port < 1 || port > 65535) { show("端口应在 1–65535 之间", "err"); return; }
-    const pub = publicChk.checked;
-    const tip = "面板会重启，当前页面断开约 3 秒。" + (pub ? "" : "\n改为仅本机后，只能通过 SSH 隧道访问。");
-    if (!confirm(tip)) return;
-    show("保存中…");
-    try {
-      const r = await api("PUT", "/api/v1/control/access", { port, public: pub, confirm: "ACCESS" });
-      const extra = (r.warnings || []).length ? " " + r.warnings.join("；") : "";
-      show("已保存" + (r.restarting ? "，面板重启中…" : "") + extra, "ok");
-      if (!r.restarting) return;
-      const h = location.hostname;
-      if (r.public && location.protocol === "http:" && h !== "127.0.0.1" && h !== "localhost" && h !== "::1") {
-        setTimeout(() => { location.href = location.protocol + "//" + h + ":" + r.port + "/"; }, 4500);
-      } else if (!r.public) {
-        show("已保存，服务重启后请通过 SSH 隧道访问 127.0.0.1:" + r.port, "ok");
-      } else {
-        show("已保存，服务重启后请用上面列出的地址访问。", "ok");
-      }
-    } catch (e) {
-      show(e.message, "err");
-    }
-  };
-
-  const showPasswordModal = (pwd) => {
-    const input = el("input", { readonly: true, class: "mono" });
-    input.value = pwd;
-    const m = modal("新密码（只显示一次）", [
-      el("div", { class: "hint", text: "请立即保存。关闭后无法再次查看，只能重新重置。" }),
-      input,
-      el("div", { class: "row wrap", style: "margin-top:12px" }, [
-        el("button", { text: "复制", onclick: async () => {
-          try { await navigator.clipboard.writeText(pwd); }
-          catch (_) { input.select(); document.execCommand("copy"); }
-        } }),
-        el("button", { class: "ghost", text: "我已保存，去登录", onclick: () => m.close() }),
-      ]),
-    ], () => {
-      state.user = null;
-      renderLogin("密码已重置，请用新密码登录");
-    });
-  };
-
-  const resetRandom = async () => {
-    if (!confirm("生成新的随机密码，并踢掉所有已登录会话？")) return;
-    try {
-      const r = await api("POST", "/api/v1/control/password", { mode: "random", confirm: "RESET" });
-      showPasswordModal(r.password);
-    } catch (e) {
-      show(e.message, "err");
-    }
-  };
-
-  const restartPanel = async () => {
-    if (!confirm("重启 panelvps 服务？面板会断开约 3 秒，网站和代理不受影响。")) return;
-    try {
-      await api("POST", "/api/v1/system/restart", { confirm: "RESTART" });
-      show("正在重启，5 秒后自动刷新…", "ok");
-      setTimeout(() => location.reload(), 5000);
-    } catch (e) {
-      show(e.message, "err");
-    }
-  };
-
-  const restartXray = async () => {
-    if (!confirm("重启 Xray？现有代理连接会短暂中断。")) return;
-    try {
-      await api("POST", "/api/v1/control/xray/restart", {});
-      show("Xray 已重启", "ok");
-    } catch (e) {
-      show(e.message, "err");
-    }
-  };
-
-  const rebootServer = async () => {
-    const word = prompt("将重启整台服务器，所有服务都会中断。\n输入 REBOOT 继续：");
-    if (word !== "REBOOT") return;
-    try {
-      await api("POST", "/api/v1/control/reboot", { confirm: "REBOOT" });
-      show("服务器正在重启，连接会中断。", "ok");
-    } catch (e) {
-      show(e.message, "err");
-    }
-  };
-
-  const paintAccess = (d) => {
-    portInput.value = String(d.panel.port || "");
-    publicChk.checked = !!d.panel.public;
-    const urls = d.panel.urls || [];
-    const kids = [
-      el("div", { class: "row wrap" }, [
-        badge(d.panel.public ? "外网可访问" : "仅本机", d.panel.public ? "warn" : "ok"),
-        el("span", { class: "mono", text: d.panel.listen || "-" }),
-      ]),
-    ];
-    urls.forEach((u) => kids.push(el("div", { style: "margin-top:6px" }, [
-      el("a", { class: "mono", href: u, target: "_blank", rel: "noreferrer", text: u }),
-    ])));
-    if (!urls.length && d.panel.public) {
-      kids.push(el("div", { class: "hint", text: "没有探测到可用地址，请用服务器公网 IP:" + d.panel.port }));
-    }
-    if ((d.panel.local_ips || []).length) {
-      kids.push(el("div", { class: "hint", text: "本机网卡地址：" + d.panel.local_ips.join("、") }));
-    }
-    kids.push(d.panel.public
-      ? el("div", { class: "banner", style: "margin-top:12px", text: "面板已对外开放，而且只提供 HTTP。请使用强密码，并确认云厂商安全组放行了 " + d.panel.port + "/tcp。" })
-      : el("div", { class: "hint", text: "只监听 127.0.0.1，需要通过 SSH 隧道访问。" }));
-    accessBox.replaceChildren.apply(accessBox, kids);
-  };
-
-  const paintAccount = (d) => {
-    const a = d.account || {};
-    accountBox.replaceChildren(
-      el("div", { class: "row wrap" }, [
-        badge(a.username || "admin", "plain"),
-        el("span", { class: "hint", text: a.last_login_at
-          ? "上次登录 " + fmtTime(a.last_login_at) + (a.last_login_ip ? " · " + a.last_login_ip : "")
-          : "还没有登录记录" }),
-      ]),
-      el("div", { class: "row wrap", style: "margin-top:12px" }, [
-        el("button", { text: "重置为随机密码", onclick: resetRandom }),
-        el("button", { class: "ghost", text: "修改密码（需旧密码）", onclick: () => renderChangePassword(false) }),
-      ]),
-      el("div", { class: "hint", text: "重置会立即踢掉所有会话，新密码只显示一次。" }),
-    );
-  };
-
-  const paintBBR = (b) => {
-    bbrBox.replaceChildren(
-      el("div", { class: "row wrap" }, [
-        badge(b.enabled ? "已开启" : "未开启", b.enabled ? "ok" : "plain"),
-        badge("拥塞控制 " + (b.current || "-"), "muted"),
-        badge("队列 " + (b.qdisc || "-"), "muted"),
-        b.supported ? null : badge("不可用", "err"),
-      ]),
-      el("div", { class: "hint", text: b.reason || ("可用算法：" + ((b.available || []).join(" ") || "-")) }),
-      el("div", { class: "row wrap", style: "margin-top:10px" }, [
-        el("button", { text: b.enabled ? "重新应用 BBR" : "开启 BBR", disabled: !b.supported, onclick: () => setBBR(true) }),
-        el("button", { class: "ghost", text: "关闭 BBR", disabled: !b.enabled, onclick: () => setBBR(false) }),
-      ]),
-      el("div", { class: "hint", text: "写入 /etc/sysctl.d/99-panelvps.conf，由 panelvps-sysctl.service 立即应用，重启后仍然有效。" }),
-    );
-  };
-
-  const paintServices = (d) => {
-    const kids = [el("button", { text: "重启面板", onclick: restartPanel })];
-    if (d.xray && d.xray.available) {
-      kids.push(el("button", { class: "ghost", text: d.xray.running ? "重启 Xray" : "启动 Xray", onclick: restartXray }));
-    }
-    kids.push(el("button", { class: "ghost danger", text: "重启服务器", onclick: rebootServer }));
-    serviceBox.replaceChildren(
-      el("div", { class: "row wrap" }, kids),
-      el("div", { class: "hint", text: "重启面板只影响管理界面；重启服务器会中断所有站点与代理。" }),
-    );
-  };
-
-  const load = async () => {
-    try {
-      const d = await api("GET", "/api/v1/control");
-      paintAccess(d);
-      paintAccount(d);
-      paintBBR(d.bbr || {});
-      paintServices(d);
-      const rows = [
-        ["主机名", d.system.hostname],
-        ["系统", d.system.distro],
-        ["内核", d.system.kernel],
-        ["架构", d.system.arch],
-        ["时区", d.system.timezone],
-        ["运行时长", uptimeText(d.system.uptime)],
-        ["面板版本", d.panel.version],
-        ["配置文件", d.panel.config_path],
-        ["防火墙", d.firewall.supported ? d.firewall.backend : (d.firewall.reason || "不可用")],
-      ];
-      sysBody.replaceChildren.apply(sysBody, rows.map(([k, v]) =>
-        el("tr", {}, [el("th", { text: k }), el("td", { class: "mono", text: String(v || "-") })])));
-    } catch (e) {
-      if (e.status === 401) { renderLogin("会话已失效，请重新登录"); return; }
-      show(e.message, "err");
-    }
-  };
-
-  root.replaceChildren(
-    msg,
-    card("访问方式", [
-      accessBox,
-      el("label", { class: "row", style: "margin-top:12px" }, [
-        publicChk, el("span", { text: "允许通过 IP + 端口访问" }),
-      ]),
-      el("label", { class: "row", style: "margin-top:8px" }, [
-        el("span", { text: "端口" }), portInput,
-        el("span", { class: "hint", text: "1–65535，保存后面板自动重启" }),
-      ]),
-      el("div", { class: "row wrap", style: "margin-top:6px" }, [
-        el("button", { text: "保存并重启面板", onclick: setAccess }),
-      ]),
-    ]),
-    card("账号", [accountBox]),
-    card("BBR 加速", [bbrBox]),
-    card("服务", [serviceBox]),
-    card("系统信息", [el("table", {}, [sysBody])]),
-  );
-  load();
-}
-
-function uptimeText(sec) {
-  sec = parseInt(sec, 10) || 0;
-  const days = Math.floor(sec / 86400);
-  const hours = Math.floor((sec % 86400) / 3600);
-  const mins = Math.floor((sec % 3600) / 60);
-  if (days > 0) return days + " 天 " + hours + " 小时";
-  if (hours > 0) return hours + " 小时 " + mins + " 分";
-  return mins + " 分";
 }
 
 // ---------- 任务进度 ----------

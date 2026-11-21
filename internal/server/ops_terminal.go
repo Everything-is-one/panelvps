@@ -23,7 +23,7 @@ const maxTerminalSessions = 2
 func (s *Server) handleTerminalTicket(w http.ResponseWriter, r *http.Request) {
 	if !s.cfg.TerminalEnabled {
 		fail(w, http.StatusForbidden, codeBadRequest,
-			"Web 终端未启用：请在配置中设置 terminal_enabled: true 后重启面板")
+			"Web 终端未启用：打开「设置 → 基本设置」，勾选「启用 Web 终端」即可")
 		return
 	}
 	if !terminal.Supported() {

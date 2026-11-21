@@ -250,3 +250,11 @@ pre.log.tall { max-height: 460px; min-height: 160px; }
 }
 
 
+
+/* 软件商店列表视图：列多，窄屏横向滚动而不是把文字挤成竖排 */
+.table-wrap { overflow-x: auto; }
+table.store-table { margin-top: 6px; }
+table.store-table th { white-space: nowrap; text-align: left; font-size: 12px; color: var(--muted); font-weight: 500; }
+table.store-table td { vertical-align: top; padding: 10px 10px 10px 0; }
+table.store-table td.sub { max-width: 320px; }
+table.store-table td .row { flex-wrap: nowrap; }
