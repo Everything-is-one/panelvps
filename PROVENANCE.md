@@ -47,11 +47,28 @@ Xray-core 采用 MPL-2.0，属于**文件级** copyleft：修改其源文件需�
 
 ## 五、第三方依赖清单
 
-> 代码落地后由 `go-licenses` / `license-checker` 在 CI 中自动生成，人工核对后提交。
+> 直接依赖人工核对（`go list -m` 的模块目录下 LICENSE 文件），间接依赖均为上述依赖带入的
+> 宽松许可（BSD-3-Clause / MIT / Apache-2.0），CI 接入 `go-licenses` 后自动复核。
 
 | 依赖 | 版本 | 许可 | 用途 |
 |---|---|---|---|
-| （待补） | | | |
+| modernc.org/sqlite | v1.39.1 | BSD-3-Clause | 纯 Go SQLite 驱动，避免 cgo |
+| golang.org/x/crypto | v0.45.0 | BSD-3-Clause | argon2id 密码哈希 |
+| golang.org/x/sys | v0.38.0 | BSD-3-Clause | 系统调用（终端、防火墙相关） |
+| gopkg.in/yaml.v3 | v3.0.1 | MIT + Apache-2.0（双许可） | 配置文件与软件清单解析 |
+| github.com/creack/pty | v1.1.24 | MIT | Web 终端的伪终端 |
+| github.com/gorilla/websocket | v1.5.3 | BSD-3-Clause | 终端 WebSocket 传输 |
+| github.com/skip2/go-qrcode | v0.0.0-20200617 | MIT | 分享链接二维码，服务端生成 |
+
+**外部程序**（不作为代码链接，仅以子进程调用，各自遵守原许可）：
+
+| 程序 | 许可 | 用途 |
+|---|---|---|
+| Xray-core | MPL-2.0 | 代理能力；面板只生成配置并通过 CLI/API 调用，不链接其代码 |
+| nginx / certbot / apt / nftables | 各自发行版许可 | 站点下发、证书、软件安装、防火墙 |
+
+MPL-2.0 是文件级 copyleft：只要不修改并分发 Xray 自身文件，就不影响本项目的许可选择。
+面板从不内嵌或改写 Xray 源码，只写 JSON 配置并调用其二进制。
 
 ## 六、为什么这样做
 
