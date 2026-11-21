@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/Everything-is-one/panelvps/internal/filemgr"
@@ -185,6 +186,34 @@ func urlEncode(s string) string {
 		b.WriteByte(hex[c&0xf])
 	}
 	return b.String()
+}
+
+// handleFileBatchDownload 把勾选的多个文件/目录打成一个 tar.gz 直接下载。
+// 用 GET 而不是 POST：浏览器只能对 GET 地址做「另存为」，
+// 前端把每个 path 作为重复的 query 参数带上来即可。
+func (s *Server) handleFileBatchDownload(w http.ResponseWriter, r *http.Request) {
+	if !s.filesReady(w) {
+		return
+	}
+	paths := r.URL.Query()["path"]
+	if len(paths) == 0 {
+		fail(w, http.StatusBadRequest, codeBadRequest, "需要至少选择一个文件")
+		return
+	}
+	// 先校验再写响应头：一旦开始写 tar 流，中途出错就只能给一个截断的文件
+	if err := s.files.CheckPack(paths); err != nil {
+		fileErr(w, err)
+		return
+	}
+	name := "panelvps-" + time.Now().Format("20060102-150405") + ".tar.gz"
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+urlEncode(name))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if err := s.files.WriteArchive(w, paths); err != nil {
+		s.logger.Error("打包下载中断", "err", err, "count", len(paths))
+		return
+	}
+	s.audit(r, "file_batch_download", name, strings.Join(paths, ","))
 }
 
 // handleFileUpload 接收 multipart 上传，逐文件流式落盘。

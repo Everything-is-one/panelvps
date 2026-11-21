@@ -442,10 +442,65 @@ func copyPath(src, dst string) error {
 	return out.Close()
 }
 
+// packTargets 统一校验「要打包哪些路径」，返回绝对路径。
+// 打包到服务器（Archive）与流式下载（WriteArchive）共用同一套规则：
+// 拒绝根目录、拒绝根目录外、拒绝一次几百项把内存和 CPU 拖死。
+func (m *Manager) packTargets(paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, errors.New("没有选择要压缩的文件")
+	}
+	if len(paths) > 200 {
+		return nil, errors.New("一次最多打包 200 项，请分批操作")
+	}
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		abs, err := m.Resolve(p)
+		if err != nil {
+			return nil, err
+		}
+		if abs == m.root {
+			return nil, errors.New("不能压缩根目录，请选择具体文件")
+		}
+		if _, err := os.Stat(abs); err != nil {
+			return nil, err
+		}
+		out = append(out, abs)
+	}
+	return out, nil
+}
+
+// CheckPack 只做校验，让 HTTP 层在写响应头之前就能报错。
+func (m *Manager) CheckPack(paths []string) error {
+	_, err := m.packTargets(paths)
+	return err
+}
+
+// WriteArchive 把若干路径打成 tar.gz 直接写进 w，不落盘。
+// 用于浏览器「打包下载」：服务器上不留临时文件，也不会因为
+// 忘记清理而在 /tmp 里积累一堆压缩包。
+func (m *Manager) WriteArchive(w io.Writer, paths []string) error {
+	targets, err := m.packTargets(paths)
+	if err != nil {
+		return err
+	}
+	gz := gzip.NewWriter(w)
+	tw := tar.NewWriter(gz)
+	for _, abs := range targets {
+		if err := addToTar(tw, abs, filepath.Base(abs)); err != nil {
+			return err
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return err
+	}
+	return gz.Close()
+}
+
 // Archive 把若干路径打成 tar.gz。dest 是压缩包路径（相对根目录）。
 func (m *Manager) Archive(paths []string, dest string) error {
-	if len(paths) == 0 {
-		return errors.New("没有选择要压缩的文件")
+	targets, err := m.packTargets(paths)
+	if err != nil {
+		return err
 	}
 	dstAbs, err := m.Resolve(dest)
 	if err != nil {
@@ -467,14 +522,7 @@ func (m *Manager) Archive(paths []string, dest string) error {
 	gz := gzip.NewWriter(tmp)
 	tw := tar.NewWriter(gz)
 
-	for _, p := range paths {
-		abs, err := m.Resolve(p)
-		if err != nil {
-			return err
-		}
-		if abs == m.root {
-			return errors.New("不能压缩根目录，请选择具体文件")
-		}
+	for _, abs := range targets {
 		base := filepath.Base(abs)
 		if err := addToTar(tw, abs, base); err != nil {
 			return err

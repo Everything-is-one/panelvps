@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Everything-is-one/panelvps/internal/metrics"
 	"github.com/Everything-is-one/panelvps/internal/store"
 	"github.com/Everything-is-one/panelvps/internal/sysinfo"
 	"github.com/Everything-is-one/panelvps/internal/version"
@@ -47,6 +48,37 @@ func (s *Server) handleProcesses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ok(w, map[string]any{"supported": true, "items": procs})
+}
+
+// handleSystemTop 给概览页的 CPU / 内存 / 磁盘卡片提供 hover 排行。
+// 单独开接口而不是塞进 /system/stat：CPU 排行要做两次采样，代价比
+// 一次普通指标采集高一个数量级，只在鼠标真的放上去时才值得付。
+func (s *Server) handleSystemTop(w http.ResponseWriter, r *http.Request) {
+	kind := r.URL.Query().Get("kind")
+	limit := 5
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 20 {
+			limit = n
+		}
+	}
+	switch kind {
+	case "cpu", "mem":
+		items, err := s.metrics.TopProcesses(kind, limit)
+		if err != nil {
+			ok(w, map[string]any{"supported": false, "reason": err.Error(), "items": []any{}})
+			return
+		}
+		ok(w, map[string]any{"supported": true, "kind": kind, "items": items})
+	case "disk":
+		items, err := metrics.TopMounts(limit)
+		if err != nil {
+			ok(w, map[string]any{"supported": false, "reason": err.Error(), "items": []any{}})
+			return
+		}
+		ok(w, map[string]any{"supported": true, "kind": kind, "items": items})
+	default:
+		fail(w, http.StatusBadRequest, codeBadRequest, "kind 只能是 cpu / mem / disk")
+	}
 }
 
 func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {

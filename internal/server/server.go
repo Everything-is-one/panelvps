@@ -220,6 +220,7 @@ func (s *Server) routes() {
 	// 系统运维
 	s.mux.HandleFunc("GET /api/v1/system/info", s.requireAuth(s.handleSystemInfo))
 	s.mux.HandleFunc("GET /api/v1/system/processes", s.requireAuth(s.handleProcesses))
+	s.mux.HandleFunc("GET /api/v1/system/top", s.requireAuth(s.handleSystemTop))
 	s.mux.HandleFunc("GET /api/v1/system/services", s.requireAuth(s.handleServices))
 	s.mux.HandleFunc("POST /api/v1/system/services/{name}/actions/{action}", s.requireAuth(s.handleServiceAction))
 	s.mux.HandleFunc("GET /api/v1/system/ports", s.requireAuth(s.handlePorts))
@@ -244,6 +245,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/files/content", s.requireAuth(s.handleFileRead))
 	s.mux.HandleFunc("PUT /api/v1/files/content", s.requireAuth(s.handleFileWrite))
 	s.mux.HandleFunc("GET /api/v1/files/download", s.requireAuth(s.handleFileDownload))
+	s.mux.HandleFunc("GET /api/v1/files/batch-download", s.requireAuth(s.handleFileBatchDownload))
 	s.mux.HandleFunc("POST /api/v1/files/upload", s.requireAuth(s.handleFileUpload))
 	s.mux.HandleFunc("POST /api/v1/files/mkdir", s.requireAuth(s.handleFileMkdir))
 	s.mux.HandleFunc("POST /api/v1/files/rename", s.requireAuth(s.handleFileRename))
