@@ -138,13 +138,14 @@ func runServe(cfgPath string) error {
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		return err
+		// 带上路径：systemd 下日志只剩这一行，没有路径很难判断是哪个文件
+		return fmt.Errorf("读取配置 %s 失败: %w", cfgPath, err)
 	}
 	logger := newLogger(cfg.LogLevel)
 
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("打开数据库 %s 失败: %w（检查磁盘空间与目录权限）", cfg.DBPath, err)
 	}
 	defer st.Close()
 

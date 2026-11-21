@@ -249,7 +249,12 @@ func SetAccess(cfgPath string, port int, public bool) (AccessResult, error) {
 
 	oldListen := cfg.Listen
 	cfg.Listen = newListen
-	if err := cfg.Save(cfgPath); err != nil {
+
+	// 只改 listen 这一行，不重写整个文件。
+	// config.Load 里的 Validate 会把 data_dir / db_path 这类相对路径按当前
+	// 工作目录解析成绝对路径，再 cfg.Save 就固化了：用户在 /root 下敲一次
+	// panelvps 菜单，systemd 起来就会去 /root/data 找数据库。
+	if err := patchListen(cfgPath, newListen); err != nil {
 		return res, fmt.Errorf("保存配置失败: %w", err)
 	}
 	res.Changed = true
@@ -261,7 +266,7 @@ func SetAccess(cfgPath string, port int, public bool) (AccessResult, error) {
 	// 已下发过防火墙规则时，必须按新端口重下一遍。
 	if synced, warns, err := syncFirewall(cfg, port, public); err != nil {
 		cfg.Listen = oldListen
-		_ = cfg.Save(cfgPath)
+		_ = patchListen(cfgPath, oldListen)
 		res.Changed = false
 		return res, fmt.Errorf("防火墙规则下发失败，已取消修改: %w", err)
 	} else {
@@ -270,6 +275,38 @@ func SetAccess(cfgPath string, port int, public bool) (AccessResult, error) {
 	}
 
 	return res, nil
+}
+
+// patchListen 只替换顶层的 listen 行，其余内容原样保留。
+//
+// 之所以不整体重新序列化：配置文件里的 data_dir 通常是 ./data 这样的相对
+// 路径，而 config.Load 为了运行时会把它按 cwd 解析成绝对路径。整体写回等于
+// 把「当时在哪个目录执行命令」固化进配置，换个目录启动就找不到数据库了。
+func patchListen(path, listen string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	lines := strings.Split(string(raw), "\n")
+	replaced := false
+	for i, line := range lines {
+		// 只认行首无缩进的 listen:，避免动到嵌套结构
+		if strings.HasPrefix(line, "listen:") {
+			lines[i] = "listen: " + listen
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		lines = append([]string{"listen: " + listen}, lines...)
+	}
+
+	body := strings.Join(lines, "\n")
+	if !strings.HasSuffix(body, "\n") {
+		body += "\n"
+	}
+	return os.WriteFile(path, []byte(body), 0o600)
 }
 
 // syncFirewall 按新的面板端口重下规则。没配置过防火墙时什么都不做。

@@ -311,19 +311,54 @@ systemctl enable panelvps-sysctl >/dev/null 2>&1 || true
 
 info "启动服务"
 systemctl start panelvps
-sleep 2
 
-if ! systemctl is-active --quiet panelvps; then
+# 等端口真的能连上，而不是只看 systemd 状态。
+# Type=simple 的单元在进程 fork 之后立刻就是 active，端口 bind 失败要再过一瞬
+# 才退出；只 sleep 2 再查 is-active，赶上快的机器会以为启动成功了。
+H_ADDR=$(sed -n 's/^listen:[[:space:]]*//p' "$CONF" | head -1 | tr -d ' "' || true)
+H_HOST=${H_ADDR%:*}
+H_PORT=${H_ADDR##*:}
+case "$H_HOST" in
+    ""|"0.0.0.0"|"::"|"[::]") H_HOST=127.0.0.1 ;;
+esac
+[[ "$H_PORT" =~ ^[0-9]+$ ]] || H_PORT=20873
+
+probe_panel() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsS -m 1 -o /dev/null "http://$1:$2/healthz" 2>/dev/null
+    else
+        (exec 3<>"/dev/tcp/$1/$2") 2>/dev/null
+    fi
+}
+
+info "等待面板响应（$H_HOST:$H_PORT）"
+READY=0
+i=0
+while [[ $i -lt 20 ]]; do
+    systemctl is-active --quiet panelvps || break
+    # 绑定在具体网卡 IP 上时，回环不一定通，两个都试
+    if probe_panel "$H_HOST" "$H_PORT" || probe_panel 127.0.0.1 "$H_PORT"; then
+        READY=1
+        break
+    fi
+    sleep 0.5
+    i=$((i + 1))
+done
+
+if [[ "$READY" -ne 1 ]]; then
     echo
     echo "---------------- systemd 状态 ----------------"
     systemctl status panelvps --no-pager -l | tail -25 || true
+    echo "---------------- 最近日志 --------------------"
+    journalctl -u panelvps -n 30 --no-pager 2>/dev/null | tail -30 || true
     echo "----------------------------------------------"
     echo
     warn "常见原因（按概率排序）："
-    warn "1) 容器内 systemd 不接受 MemoryMax / ProtectSystem —— 本脚本已自动装覆盖，若仍失败请检查 $DROPIN_DIR/container.conf 是否生效"
-    warn "2) 配置里 listen 的端口已被占用"
-    warn "3) 数据目录权限不对：chown -R root:root $DATA && chmod 700 $DATA"
-    warn "4) 磁盘满：df -h $PREFIX"
+    warn "1) 配置里 listen 的端口已被占用：ss -ltnp | grep :$H_PORT"
+    warn "2) 配置里 listen 的地址本机没有（IP 写错或网卡还没起来）：$H_ADDR"
+    warn "3) 容器内 systemd 不接受 MemoryMax / ProtectSystem —— 本脚本已自动装覆盖，若仍失败请检查 $DROPIN_DIR/container.conf 是否生效"
+    warn "4) 数据目录权限不对：chown -R root:root $DATA && chmod 700 $DATA"
+    warn "5) 磁盘满：df -h $PREFIX"
     die "启动失败，请查看上面的日志"
 fi
 
