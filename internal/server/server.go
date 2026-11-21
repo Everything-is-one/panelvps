@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -126,7 +127,17 @@ func New(cfg *config.Config, st *store.Store, logger *slog.Logger) (*Server, err
 		s.appstore = apps
 	}
 	if bm, err := backup.New(cfg.BackupDir, cfg.DataDir); err != nil {
-		logger.Warn("备份模块不可用", "err", err)
+		// 配置里的备份目录写不进去（改过 data_dir 的老配置、挂载成只读的外置盘等），
+		// 与其让用户在点「立即备份」时才看到 read-only，不如现在退回数据目录下。
+		fallback := filepath.Join(cfg.DataDir, "backups")
+		if bm2, err2 := backup.New(fallback, cfg.DataDir); err2 == nil {
+			logger.Warn("备份目录不可写，已回落到数据目录",
+				"configured", cfg.BackupDir, "using", fallback, "reason", err)
+			cfg.BackupDir = fallback
+			s.backups = bm2
+		} else {
+			logger.Warn("备份模块不可用", "dir", cfg.BackupDir, "err", err)
+		}
 	} else {
 		s.backups = bm
 	}

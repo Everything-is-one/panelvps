@@ -49,6 +49,16 @@ func New(dir, dataDir string) (*Manager, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	// MkdirAll 对「已经存在」的目录总是成功，哪怕当前进程根本写不进去
+	// （服务以 ProtectSystem=strict 运行时，宿主机上存在的 /root/data 就是只读）。
+	// 真正写一次才知道能不能用，否则要等到用户点备份才暴露。
+	probe, err := os.CreateTemp(dir, ".pv-write-test-")
+	if err != nil {
+		return nil, fmt.Errorf("备份目录不可写: %w", err)
+	}
+	name := probe.Name()
+	_ = probe.Close()
+	_ = os.Remove(name)
 	return &Manager{Dir: dir, DataDir: dataDir}, nil
 }
 

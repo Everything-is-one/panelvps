@@ -250,6 +250,22 @@ func (c *Config) Validate() error {
 	if !filepath.IsAbs(c.XrayConfDir) {
 		c.XrayConfDir = filepath.Join(c.DataDir, c.XrayConfDir)
 	}
+	// 0.3.0 的 SetAccess 曾把 Validate 之后的整份配置写回文件，把
+	// backup_dir 从相对值 "backups" 固化成 <旧 data_dir>/backups 的绝对路径。
+	// 用户后来把 data_dir 改回 ./data，备份却仍指向旧目录（典型是
+	// /root/data/backups），而 /root 在服务沙箱里只读，一备份就报
+	// "read-only file system"。这里识别这种残留并纠正回相对值。
+	if filepath.IsAbs(c.BackupDir) {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			legacy := filepath.Join(home, "data", "backups")
+			current := filepath.Join(home, "data")
+			if filepath.Clean(c.BackupDir) == legacy &&
+				c.DataDir != current &&
+				!strings.HasPrefix(c.DataDir, current+string(filepath.Separator)) {
+				c.BackupDir = "backups"
+			}
+		}
+	}
 	if !filepath.IsAbs(c.BackupDir) {
 		c.BackupDir = filepath.Join(c.DataDir, c.BackupDir)
 	}
@@ -325,6 +341,33 @@ func (c *Config) Save(path string) error {
 
 // Path 返回配置文件自身路径，备份时用于一并打包。
 func (c *Config) Path() string { return c.path }
+
+// PatchScalar 只改配置文件里某个顶层键的值，其余内容原样保留。
+//
+// 不要用 Save 做运行期的小改动：Save 写的是内存里的 cfg，而 Validate 已经把
+// data_dir、backup_dir 这些相对路径解析成绝对路径，写回去就会把「./data」
+// 固化成「/root/data」——0.3.0 那次线上故障就是这么来的。
+func PatchScalar(path, key, literal string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(raw), "\n")
+	prefix := key + ":"
+	found := false
+	for i, line := range lines {
+		// 只替换顶层键：缩进行属于嵌套结构，不能碰
+		if strings.HasPrefix(line, prefix) {
+			lines[i] = key + ": " + literal
+			found = true
+			break
+		}
+	}
+	if !found {
+		lines = append(lines, key+": "+literal)
+	}
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o600)
+}
 
 // IsLoopback 判断当前监听是否只对本机开放。// 首页与安装脚本据此决定是否提示「面板已暴露在公网」。
 func (c *Config) IsLoopback() bool {

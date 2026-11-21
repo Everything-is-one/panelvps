@@ -41,6 +41,12 @@ func (s *Server) withRecover(next http.Handler) http.Handler {
 func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
+		// Go 默认不发 Server 头。这里显式写一个，纯粹为了可辨识：
+		// 面包在代理后面时，用户拿 curl -i 一眼就能看出 502/503 是谁发的。
+		// 只写产品名，不带版本号，不额外泄露信息。
+		if h.Get("Server") == "" {
+			h.Set("Server", "PanelVPS")
+		}
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")

@@ -286,6 +286,15 @@ if [[ "$DATA_DIR_CFG" == /* && "$DATA_DIR_CFG" != "$DATA" ]]; then
     warn "  sed -i 's|^data_dir:.*|data_dir: ./data|' $CONF && systemctl restart panelvps"
 fi
 
+# 同一次污染还会把 backup_dir 写成 /root/data/backups 的绝对路径。
+# 用户只改了 data_dir 的话，备份仍指向旧目录，在服务沙箱里是只读的，
+# 一点「立即备份」就报 read-only file system。
+BACKUP_DIR_CFG=$(sed -n 's/^backup_dir:[[:space:]]*//p' "$CONF" | head -1 | tr -d '"' || true)
+if [[ "$BACKUP_DIR_CFG" == /* && "$BACKUP_DIR_CFG" != "$DATA/backups" ]]; then
+    warn "配置里的 backup_dir 是 $BACKUP_DIR_CFG，建议改回相对值："
+    warn "  sed -i 's|^backup_dir:.*|backup_dir: backups|' $CONF && systemctl restart panelvps"
+fi
+
 if [[ "$PUBLIC" -eq 1 ]]; then
     CFG_PORT=$(grep -E '^listen:' "$CONF" | sed 's/.*://' | tr -d ' ' || true)
     CFG_PORT=${CFG_PORT:-20873}
