@@ -346,8 +346,10 @@ func buildInbound(in store.Inbound, clients []store.Client, now time.Time) (Inbo
 				return InboundSpec{}, fmt.Errorf("用户 %s 的 UUID 格式非法", c.Email)
 			}
 			flow := c.Flow
-			if in.Security != "reality" {
-				flow = "" // xtls-rprx-vision 只用于 REALITY/TLS
+			// xtls-rprx-vision 只支持 TCP。ws / grpc 带上它，Xray 能通过
+			// -test 但握手会失败，表现为"客户端连不上"。
+			if in.Network != "tcp" || in.Security == "none" {
+				flow = ""
 			}
 			s.Clients = append(s.Clients, vlessClient{
 				ID: c.Secret, Email: c.Email, Flow: flow, Level: c.Level,

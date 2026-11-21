@@ -70,7 +70,8 @@ func buildVLESS(in store.Inbound, c store.Client, opts Options, host string, por
 			q.Set("sid", opts.ShortIDs[0])
 		}
 		q.Set("spx", "/")
-		if c.Flow != "" {
+		// flow 只在 TCP 上有效；grpc / ws 带上去客户端会直接连不上
+		if c.Flow != "" && in.Network == "tcp" {
 			q.Set("flow", c.Flow)
 		}
 	case "tls":
@@ -84,12 +85,14 @@ func buildVLESS(in store.Inbound, c store.Client, opts Options, host string, por
 		if len(opts.Alpn) > 0 {
 			q.Set("alpn", strings.Join(opts.Alpn, ","))
 		}
-		if c.Flow != "" {
+		// flow 只在 TCP 上有效；grpc / ws 带上去客户端会直接连不上
+		if c.Flow != "" && in.Network == "tcp" {
 			q.Set("flow", c.Flow)
 		}
 	default:
 		q.Set("security", "none")
-		if c.Flow != "" {
+		// flow 只在 TCP 上有效；grpc / ws 带上去客户端会直接连不上
+		if c.Flow != "" && in.Network == "tcp" {
 			q.Set("flow", c.Flow)
 		}
 	}

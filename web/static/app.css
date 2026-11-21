@@ -317,11 +317,14 @@ table.clients td { vertical-align: middle; }
 .modal {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius); box-shadow: var(--shadow-lg);
-  width: 100%; max-width: 560px; max-height: 86vh; overflow: auto; padding: 20px;
+  width: 100%; max-width: 560px; max-height: 86vh; padding: 20px;
+  /* 标题固定、内容滚动：字段多的表单（新建入站）在笔记本屏幕上
+     按钮会掉到视口外，整块滚走标题又容易迷路 */
+  display: flex; flex-direction: column; overflow: hidden;
 }
-.modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; flex: 0 0 auto; }
 .modal-head h3 { margin: 0; font-size: 15px; font-weight: 600; }
-.modal-body { display: block; }
+.modal-body { display: block; flex: 1 1 auto; overflow: auto; padding-right: 2px; }
 
 /* ---------- 其它 ---------- */
 

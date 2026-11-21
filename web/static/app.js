@@ -561,6 +561,7 @@ function inboundCard(ib, data, pageRoot) {
         el("div", { class: "mono muted", text: ":" + ib.port + "  " + detail + "  流量 ↑" + fmtBytes(ib.up) + " ↓" + fmtBytes(ib.down) }),
       ]),
       el("div", { class: "row" }, [
+        el("button", { class: "ghost", text: "复制链接", onclick: (ev) => copyInboundLink(ib, ev.target) }),
         el("button", { class: "ghost", text: "+ 用户", onclick: () => clientForm(ib, pageRoot) }),
         el("button", { class: "ghost", text: ib.enabled ? "停用" : "启用", onclick: () => toggleInbound(ib, pageRoot) }),
         el("button", { class: "ghost danger", text: "删除", onclick: () => removeInbound(ib, pageRoot) }),
@@ -570,17 +571,57 @@ function inboundCard(ib, data, pageRoot) {
   ]);
 }
 
+// 复制文本。面板一般是 http://IP:端口 打开的，navigator.clipboard 在
+// 非安全上下文里根本不存在，所以老办法 execCommand 才是主路径。
+async function copyText(text) {
+  if (!text) return false;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (_) { /* 落到下面 */ }
+  const ta = el("textarea", { text: text });
+  ta.style.position = "fixed";
+  ta.style.top = "-1000px";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch (_) { ok = false; }
+  ta.remove();
+  return ok;
+}
+
+function copyWithFeedback(btn, text, doneText) {
+  copyText(text).then((ok) => {
+    const old = btn.textContent;
+    btn.textContent = ok ? (doneText || "已复制") : "复制失败";
+    setTimeout(() => { btn.textContent = old; }, 2000);
+  });
+}
+
+async function copyInboundLink(ib, btn) {
+  const list = ib.clients || [];
+  const c = list.find((x) => x.enabled) || list[0];
+  if (!c) {
+    alert("这个入站还没有用户，先点「+ 用户」创建一个。");
+    return;
+  }
+  if (!c.link) {
+    alert("还没填服务器公网地址，无法生成链接。请在上方「公网地址」里填 IP 或域名后保存。");
+    return;
+  }
+  copyWithFeedback(btn, c.link, "已复制连接");
+}
+
 function showLink(client) {
   const link = client.link || "";
   const box = el("div", {}, [
     el("p", { class: "sub", text: "把链接导入客户端，或用手机扫码。" }),
     el("textarea", { class: "link-box", rows: "4", readonly: true, text: link }),
     el("div", { class: "row", style: "margin-top:12px" }, [
-      el("button", { class: "ghost", text: "复制链接", onclick: async () => {
-        try { await navigator.clipboard.writeText(link); } catch (_) {
-          const ta = document.querySelector(".link-box"); ta.select(); document.execCommand("copy");
-        }
-      } }),
+      el("button", { class: "ghost", text: "复制链接", onclick: (ev) => copyWithFeedback(ev.target, link, "已复制") }),
     ]),
     el("div", { class: "qr" }, [
       el("img", { src: "/api/v1/proxies/clients/" + client.id + "/qr", alt: "二维码", width: "240", height: "240" }),
@@ -639,12 +680,21 @@ function select(options, value) {
   return s;
 }
 
+// 端口随机：20xxx–59xxx，避开常见服务与面板自身端口段，撞了后端会提示
+function randomPort() {
+  return 20000 + Math.floor(Math.random() * 40000);
+}
+
 function inboundForm(root) {
   const protocol = select(["vless", "vmess", "trojan", "shadowsocks"], "vless");
   const network = select(["tcp", "ws", "grpc"], "tcp");
   const security = select(["none", "tls", "reality"], "reality");
   const listen = el("input", { value: "0.0.0.0" });
-  const port = el("input", { value: "443", type: "number", min: "1", max: "65535" });
+  const port = el("input", { value: String(randomPort()), type: "number", min: "1", max: "65535", style: "flex:1;min-width:0" });
+  const portRoll = el("button", {
+    class: "ghost", text: "随机", style: "flex:0 0 auto",
+    onclick: () => { port.value = String(randomPort()); },
+  });
   const remark = el("input", { placeholder: "例如：东京节点" });
   const dest = el("input", { value: "www.cloudflare.com:443", placeholder: "REALITY 伪装目标 host:port" });
   const sni = el("input", { value: "www.cloudflare.com", placeholder: "serverNames，多个用逗号分隔" });
@@ -657,8 +707,9 @@ function inboundForm(root) {
   const msg = el("div", { class: "msg" });
 
   const realityBox = el("div", {}, [
-    field("伪装目标（dest）", dest, "建议用大站 443，且目标站支持 TLS1.3"),
-    field("SNI / serverNames", sni, "与目标站域名一致"),
+    field("伪装目标（dest）", dest, "建议用大站 443，且目标站支持 TLS1.3；只填域名会自动补 :443"),
+    field("SNI / serverNames", sni, "必须与目标站同域，客户端靠它伪装"),
+    el("div", { class: "hint", text: "私钥、公钥、shortId 都由服务端自动生成，不用填，公钥会自动写进分享链接。流控 xtls-rprx-vision 只在 TCP 上生效，创建用户时会自动带上；gRPC 不支持流控，留空即可。" }),
   ]);
   const tlsBox = el("div", {}, [field("证书路径", certFile), field("私钥路径", keyFile)]);
   const wsBox = el("div", {}, [field("WebSocket 路径", wsPath)]);
@@ -727,12 +778,15 @@ function inboundForm(root) {
   } });
 
   const m = modal("新建入站", [
-    field("备注", remark),
+    field("备注", remark, "只影响显示与分享链接里的备注名"),
     field("协议", protocol),
-    el("div", { class: "row" }, [field("监听地址", listen), field("端口", port)]),
-    field("传输方式", network),
+    el("div", { class: "row" }, [
+      field("监听地址", listen, "0.0.0.0 = IPv4 + IPv6 同时监听"),
+      field("端口", el("div", { class: "row", style: "gap:6px" }, [port, portRoll]), "默认随机，被占用会提示换一个"),
+    ]),
+    field("传输方式", network, "REALITY 选 tcp 或 grpc；ws 一般配合 CDN"),
     wsBox,
-    field("安全类型", security),
+    field("安全类型", security, "reality 不需要证书，也最省事"),
     realityBox,
     tlsBox,
     ssBox,

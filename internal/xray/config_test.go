@@ -279,3 +279,45 @@ func TestLinkGeneration(t *testing.T) {
 		t.Fatal("缺少公网地址时应报错")
 	}
 }
+
+// gRPC / ws 上带 xtls-rprx-vision，Xray 能过 -test 但握手会失败，
+// 用户只会看到「客户端连不上」。生成配置时必须按传输方式清掉。
+func TestNonTCPStripsVisionFlow(t *testing.T) {
+	priv, pub, err := NewRealityKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := Options{
+		Dest: "www.apple.com:443", ServerNames: []string{"www.apple.com"},
+		ShortIDs: []string{"ab12cd34"}, PrivateKey: priv, PublicKey: pub,
+	}
+	for _, tc := range []struct {
+		network string
+		want    bool
+	}{
+		{"tcp", true},
+		{"grpc", false},
+	} {
+		in := baseInbound("vless", tc.network, "reality", 24448, opts)
+		in.ID = 7
+		cfg, err := BuildConfig(Plan{
+			Inbounds: []store.Inbound{in},
+			Clients: map[int64][]store.Client{7: {{
+				ID: 1, InboundID: 7, Email: "a", Secret: mustUUID(t),
+				Flow: "xtls-rprx-vision", Enabled: true,
+			}}},
+			APIPort: 10085, Now: time.Now(),
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.network, err)
+		}
+		raw, err := marshalJSON(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := strings.Contains(raw, "xtls-rprx-vision")
+		if got != tc.want {
+			t.Fatalf("%s: flow 出现=%v，期望 %v", tc.network, got, tc.want)
+		}
+	}
+}

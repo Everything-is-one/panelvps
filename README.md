@@ -97,8 +97,8 @@ curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/main/dep
 生产环境建议锁定版本，让脚本和二进制取同一个 tag，避免 `main` 更新后错配：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.3.6/deploy/bootstrap.sh \
-    | sudo bash -s -- --ref v0.3.6
+curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.3.7/deploy/bootstrap.sh \
+    | sudo bash -s -- --ref v0.3.7
 ```
 
 只体检、不安装（逐项报告能力，不改动系统）：
@@ -314,8 +314,14 @@ Windows 上无法创建 PTY。有 FAIL 时脚本以退出码 1 结束，可用�
 | 进程托管 | 子进程 + 指数退避重拉（1s→30s），面板退出时一并收掉，不留孤儿 |
 | 流量统计 | 走 `xray api statsquery`，不引入 gRPC/protobuf 依赖；游标做差，进程重启不清零 |
 | 配额 | 超额/到期自动禁用并重建配置，界面状态与实际一致 |
-| 分享链接 | vless / vmess / trojan / ss 四种；二维码服务端生成，前端零依赖 |
-| 密钥 | REALITY X25519 密钥对、UUIDv4、SS-2022 定长 PSK 均由服务端生成 |
+| 分享链接 | vless / vmess / trojan / ss 四种；入站卡片上一键复制，也可扫码；二维码服务端生成，前端零依赖 |
+| 密钥 | REALITY X25519 密钥对、UUIDv4、SS-2022 定长 PSK 均由服务端生成，表单里不用填 |
+
+**新建入站的默认行为**：端口在 20000–59999 里随机挑一个（避开面板端口、Xray
+内部接口与已有入站），同时自动建一个名为 `default` 的用户 —— 建完立刻能「复制链接」，
+不用再点一次「+ 用户」。REALITY 的私钥、公钥、shortId 全部自动生成，表单只需要
+伪装目标与 SNI（默认 `www.cloudflare.com`）。`xtls-rprx-vision` 只在 TCP 上生效，
+创建用户时自动带上；gRPC 不带（带了会让客户端握手失败）。
 
 **M1 实测结论**（2026-11-21，Xray 26.11.9）：
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"strconv"
@@ -172,10 +173,42 @@ func (s *Server) handleCreateInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	in.ID = id
 
+	// 顺手配一个默认用户：否则界面显示「暂无用户」，还得再点一次「+ 用户」
+	// 才能拿到连接链接，第一眼看上去像坏了。
+	clientID, cerr := s.ensureDefaultClient(r.Context(), in)
+	if cerr != nil {
+		s.logger.Warn("创建默认用户失败", "inbound", in.Tag, "err", cerr)
+	}
+
 	s.audit(r, "inbound_create", in.Tag, fmt.Sprintf("%s:%d/%s", in.Listen, in.Port, in.Protocol))
 	apply := s.applyXray(r.Context())
 	s.logger.Info("创建入站", "tag", in.Tag, "port", in.Port, "protocol", in.Protocol)
-	ok(w, map[string]any{"id": id, "apply": apply})
+	out := map[string]any{"id": id, "apply": apply}
+	if clientID > 0 {
+		out["client_id"] = clientID
+	}
+	if cerr != nil {
+		out["client_error"] = cerr.Error()
+	}
+	ok(w, out)
+}
+
+// ensureDefaultClient 给新入站配一个默认用户，返回其 ID。
+//
+// email 是 Xray 的统计维度，必须全局唯一，所以重名时加序号。
+func (s *Server) ensureDefaultClient(ctx context.Context, in *store.Inbound) (int64, error) {
+	email := "default"
+	for i := 2; i <= 20; i++ {
+		if _, err := s.st.ClientByEmail(ctx, email); err != nil {
+			break
+		}
+		email = fmt.Sprintf("default-%d", i)
+	}
+	c, err := s.buildClient(ctx, clientReq{Email: email}, in, nil)
+	if err != nil {
+		return 0, err
+	}
+	return s.st.CreateClient(ctx, c)
 }
 
 func (s *Server) handleUpdateInbound(w http.ResponseWriter, r *http.Request) {
@@ -229,6 +262,34 @@ func (s *Server) handleDeleteInbound(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildInbound 校验并补全入站参数。prev 非空表示更新，用于继承未提交的字段。
+// pickPort 在 20000–59999 里挑一个没被占用的端口。
+func (s *Server) pickPort(ctx context.Context, listen string) (int, error) {
+	for i := 0; i < 64; i++ {
+		p := 20000 + rand.IntN(40000)
+		if s.portInUse(ctx, listen, p) {
+			continue
+		}
+		return p, nil
+	}
+	return 0, errors.New("连续 64 次随机端口都被占用，请手工指定一个端口")
+}
+
+// portInUse 判断端口是否已被面板、Xray 内部接口或其它入站占用。
+func (s *Server) portInUse(ctx context.Context, listen string, p int) bool {
+	if _, port, err := net.SplitHostPort(s.cfg.Listen); err == nil {
+		if v, _ := strconv.Atoi(port); v == p {
+			return true
+		}
+	}
+	if p == s.cfg.XrayAPIPort {
+		return true
+	}
+	if other, err := s.st.InboundByPort(ctx, listen, p, 0); err == nil && other != nil {
+		return true
+	}
+	return false
+}
+
 func (s *Server) buildInbound(ctx context.Context, req inboundReq, prev *store.Inbound) (*store.Inbound, error) {
 	in := &store.Inbound{}
 	if prev != nil {
@@ -253,6 +314,15 @@ func (s *Server) buildInbound(ctx context.Context, req inboundReq, prev *store.I
 	}
 	if req.Port != 0 {
 		in.Port = req.Port
+	}
+	// 没指定端口就随机挑一个：固定 443 会让第二个入站必撞端口，
+	// 也让扫描器一眼认出这是面板生成的节点。
+	if in.Port == 0 && prev == nil {
+		p, err := s.pickPort(ctx, in.Listen)
+		if err != nil {
+			return nil, err
+		}
+		in.Port = p
 	}
 	if in.Port < 1 || in.Port > 65535 {
 		return nil, errors.New("端口必须在 1–65535 之间")
@@ -582,10 +652,13 @@ func (s *Server) buildClient(ctx context.Context, req clientReq, in *store.Inbou
 	if req.Flow != "" {
 		c.Flow = req.Flow
 	}
-	if in.Protocol == "vless" && (in.Security == "reality" || in.Security == "tls") && c.Flow == "" {
+	// xtls-rprx-vision 只跑在 TCP 上。ws / grpc 带这个 flow，Xray 会
+	// 在握手阶段拒绝连接（配置能过 -test，用户只会看到"连不上"），
+	// 所以这里必须按传输方式卡住，不能只看 security。
+	if in.Protocol == "vless" && in.Network == "tcp" && (in.Security == "reality" || in.Security == "tls") && c.Flow == "" {
 		c.Flow = "xtls-rprx-vision"
 	}
-	if in.Protocol != "vless" {
+	if in.Protocol != "vless" || in.Network != "tcp" {
 		c.Flow = ""
 	}
 
