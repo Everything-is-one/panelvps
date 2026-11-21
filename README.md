@@ -112,7 +112,11 @@ curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/main/dep
 | `--base URL` | `--base https://dl.example.com/panelvps` | 国内访问 GitHub 慢，自建分发 |
 | 本地文件 | `sudo ./deploy/install.sh` | 已手工上传安装包 |
 
-国内机器拉 GitHub 超时时，用发布脚本把安装包推到自己有 HTTPS 的目录，再带 `--base` 安装：
+跑脚本本身走 `raw.githubusercontent.com`，下二进制走 Release。这两条路在国内都可能被干扰，
+所以 `bootstrap.sh` 内置了回退：直链返回非 200 时自动改用 `api.github.com` 取同一份资产，
+两条都不通才会报错。实测 `github.com/releases/download` 会间歇性返回 502，而 API 通道稳定。
+
+仍拉不动时，用发布脚本把安装包推到自己有 HTTPS 的目录，再带 `--base` 安装：
 
 ```bash
 # 本机执行：交叉编译 → 生成 SHA256SUMS → 上传
