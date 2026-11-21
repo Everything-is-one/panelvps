@@ -151,6 +151,7 @@ function renderLogin(message) {
 
   app().className = "login-wrap";
   app().replaceChildren(el("div", { class: "card login-card" }, [
+    el("div", { class: "login-brand" }, [el("span", { class: "brand-mark", text: "PV" })]),
     el("h1", { text: "PanelVPS" }),
     el("p", { class: "sub", text: "轻量运维面板 · 请登录" }),
     form,
@@ -205,25 +206,30 @@ function renderChangePassword(forced) {
 
 // ---------- 外壳 ----------
 
-// 导航图标：单路径线性图标，统一 24 视窗、1.7 描边，避免各页面风格打架。
+// 导航图标：单路径线性图标，统一 24 视窗、1.7 描边。
+// 关键约束：所有图形的墨迹范围都控制在 4–20，否则同一列图标的光学大小
+// 会参差不齐（早期版本 relay 只占 10px 高、logs 只有 12px 宽，看起来就没对齐）。
 const NAV_ICONS = {
   overview: "M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z",
-  proxy: "M4 8h12l-3-3m3 3-3 3M20 16H8l3-3m-3 3 3 3",
-  relay: "M3 7h7v10H3zM14 7h7v10h-7zM10 12h4m-2-2 2 2-2 2",
-  sites: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18m0 0c2.4 2.5 3.6 5.5 3.6 9s-1.2 6.5-3.6 9m0-18c-2.4 2.5-3.6 5.5-3.6 9s1.2 6.5 3.6 9M3.4 9h17.2M3.4 15h17.2",
+  proxy: "M8 4 4 8l4 4M4 8h16M16 20l4-4-4-4M20 16H4",
+  relay: "M4 4h5v5H4zM15 15h5v5h-5zM9 6.5h6a2 2 0 0 1 2 2V15",
+  sites: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18M3 12h18M12 3c2.4 2.5 3.6 5.5 3.6 9s-1.2 6.5-3.6 9c-2.4-2.5-3.6-5.5-3.6-9S9.6 5.5 12 3",
   files: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
-  terminal: "M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1m4 5 3 2.5L8 15m5 0h4",
+  terminal: "M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1M8 10l3 2.5L8 15M13 15h4",
   firewall: "M12 3l8 3v6c0 5-3.4 8.2-8 9-4.6-.8-8-4-8-9V6z",
-  logs: "M5 6h14M5 12h14M5 18h9",
-  store: "M6 8h12l1 12H5zM9 8a3 3 0 0 1 6 0",
+  logs: "M8 6h12M8 12h12M8 18h8M4 6h.01M4 12h.01M4 18h.01",
+  store: "M4 8h16l-1.2 12H5.2zM8.5 8V6a3.5 3.5 0 0 1 7 0v2",
   backup: "M4 7c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3m0 0v10c0 1.7 3.6 3 8 3s8-1.3 8-3V7M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
   settings: "M4 7h6M14 7h6M4 17h10M18 17h2M12 4v6M8 14v6",
 };
 
-const NAV_ITEMS = [
-  ["overview", "概览"], ["proxy", "代理"], ["relay", "中转"], ["sites", "网站"], ["files", "文件"],
-  ["terminal", "终端"], ["firewall", "防火墙"], ["logs", "日志"], ["store", "商店"],
-  ["backup", "备份"], ["settings", "设置"],
+// 导航分组：条目多了以后平铺成一长列很难扫，按「网络 / 系统」分两段，
+// 段标题用小号灰字，视觉上形成节奏。
+const NAV_GROUPS = [
+  ["", [["overview", "概览"]]],
+  ["网络", [["proxy", "代理"], ["relay", "中转"], ["sites", "网站"], ["firewall", "防火墙"]]],
+  ["系统", [["files", "文件"], ["terminal", "终端"], ["logs", "日志"],
+            ["store", "商店"], ["backup", "备份"], ["settings", "设置"]]],
 ];
 
 const VIEW_META = {
@@ -273,11 +279,13 @@ function renderApp(view) {
     renderLogin("");
   };
 
-  const navItems = NAV_ITEMS.map(([key, label]) => el("button", {
+  const navButton = ([key, label]) => el("button", {
     class: "nav-item" + (state.view === key ? " active" : ""),
     onclick: () => renderApp(key),
     title: label,
-  }, [icon(key), el("span", { text: label })]));
+  }, [icon(key), el("span", { text: label })]);
+  const navItems = NAV_GROUPS.map(([label, items]) => el("div", { class: "nav-group" },
+    (label ? [el("div", { class: "nav-label", text: label })] : []).concat(items.map(navButton))));
 
   const username = state.user ? state.user.username : "admin";
   const sidebar = el("aside", { class: "sidebar" }, [
@@ -2035,9 +2043,8 @@ function storeActions(m, supported, reload) {
         watchJob(job, reload);
       } catch (e) { alert(e.message); }
     } }));
-  } else {
-    acts.push(el("button", { text: supported ? "安装" : "仅 Linux 可安装", onclick: async () => {
-      if (!supported) return alert("软件商店仅能在 Linux 服务器上执行安装");
+  } else if (supported) {
+    acts.push(el("button", { text: "安装", onclick: async () => {
       if (m.risk === "high" && !confirm("该软件标记为高风险：" + (m.warning || "") + "\n\n仍要继续？")) return;
       else if (m.risk !== "high" && !confirm("安装 " + m.name + "？预计占用内存 " + m.memory_mb + "MB。")) return;
       try {
@@ -2045,6 +2052,10 @@ function storeActions(m, supported, reload) {
         watchJob(job, reload);
       } catch (e) { alert(e.message); }
     } }));
+  } else {
+    // 不支持时不是一个「动作」，用标签而不是按钮：整列 12 个同样的靛蓝按钮
+    // 会把页面压成一堵色墙，也让真正可点的「安装」失去重点。
+    acts.push(el("span", { class: "badge muted", text: "仅 Linux 可安装" }));
   }
   return acts;
 }
