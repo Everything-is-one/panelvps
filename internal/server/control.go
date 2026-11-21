@@ -574,7 +574,9 @@ func (s *Server) restartPanelSoon(delay time.Duration) {
 
 	go func() {
 		time.Sleep(delay)
-		if err := exec.Command("systemctl", "restart", "panelvps").Run(); err != nil {
+		// --no-block：把重启任务交给 systemd 后立刻返回。这个进程本身就在被重启的
+		// 单元里，等任务完成只会等到自己被 SIGTERM 杀掉。
+		if err := exec.Command("systemctl", "--no-block", "restart", "panelvps").Run(); err != nil {
 			s.logger.Error("重启面板失败", "err", err)
 			s.restartMu.Lock()
 			s.restarting = false
