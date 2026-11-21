@@ -173,6 +173,15 @@ func runServe(cfgPath string) error {
 		}
 	}()
 
+	// SSH 爆破巡检：一分钟一次，达到阈值自动封禁
+	go func() {
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for range t.C {
+			srv.SSHGuardTick(context.Background())
+		}
+	}()
+
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           srv.Handler(),

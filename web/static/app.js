@@ -227,14 +227,29 @@ function renderApp(view) {
     el("div", { class: "row" }, [changePwd, logout]),
   ]);
 
-  const nav = el("div", { class: "tabs" }, [navBtn("overview", "概览"), navBtn("proxy", "代理")]);
+  const nav = el("div", { class: "tabs" }, [
+    navBtn("overview", "概览"), navBtn("proxy", "代理"), navBtn("sites", "网站"),
+    navBtn("files", "文件"), navBtn("terminal", "终端"), navBtn("firewall", "防火墙"),
+    navBtn("logs", "日志"), navBtn("store", "商店"), navBtn("backup", "备份"),
+    navBtn("settings", "设置"),
+  ]);
   const content = el("div", { id: "view" });
 
   app().className = "";
   app().replaceChildren(head, nav, content);
 
-  if (state.view === "proxy") renderProxyView(content);
-  else renderOverviewView(content);
+  switch (state.view) {
+    case "proxy": renderProxyView(content); break;
+    case "sites": renderSitesView(content); break;
+    case "files": renderFilesView(content); break;
+    case "terminal": renderTerminalView(content); break;
+    case "firewall": renderFirewallView(content); break;
+    case "logs": renderLogsView(content); break;
+    case "store": renderStoreView(content); break;
+    case "backup": renderBackupView(content); break;
+    case "settings": renderSettingsView(content); break;
+    default: renderOverviewView(content);
+  }
 }
 
 // ---------- 概览 ----------
@@ -513,8 +528,10 @@ function field(label, node, hint) {
 function select(options, value) {
   const s = el("select", {});
   options.forEach((o) => {
-    const opt = el("option", { value: o, text: o });
-    if (o === value) opt.selected = true;
+    const val = Array.isArray(o) ? o[0] : o;
+    const label = Array.isArray(o) ? o[1] : o;
+    const opt = el("option", { value: val, text: label });
+    if (val === value) opt.selected = true;
     s.appendChild(opt);
   });
   return s;
@@ -693,6 +710,948 @@ async function removeInbound(ib, root) {
     await api("DELETE", "/api/v1/proxies/inbounds/" + ib.id, {});
     if (window.__proxyRefresh) window.__proxyRefresh();
   } catch (e) { alert(e.message); }
+}
+
+// ---------- 通用小部件 ----------
+
+function card(title, nodes, extra) {
+  const head = el("div", { class: "card-head" }, [
+    el("h2", { text: title }),
+    extra ? el("div", { class: "row" }, extra) : null,
+  ]);
+  return el("div", { class: "card section" }, [head].concat(nodes));
+}
+
+function fmtTime(s) {
+  if (!s) return "—";
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return String(s);
+  const p = (n) => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
+    " " + p(d.getHours()) + ":" + p(d.getMinutes());
+}
+
+function simpleTable(headers, rows) {
+  return el("table", { class: "data" }, [
+    el("thead", {}, [el("tr", {}, headers.map((h) => el("th", { text: h })))]),
+    el("tbody", {}, rows),
+  ]);
+}
+
+function emptyHint(text) {
+  return el("div", { class: "empty", text: text });
+}
+
+// ---------- 文件管理 ----------
+
+function renderFilesView(root) {
+  let cwd = "";
+  const pathBar = el("div", { class: "path-bar mono", text: "/" });
+  const listBox = el("div");
+  const msg = el("div", { class: "msg" });
+  const selected = new Set();
+  const fileInput = el("input", { type: "file", multiple: true, style: "display:none" });
+
+  const refresh = async () => {
+    msg.className = "msg";
+    msg.textContent = "读取中…";
+    try {
+      const data = await api("GET", "/api/v1/files?path=" + encodeURIComponent(cwd) + "&hidden=1");
+      pathBar.textContent = "/" + (data.path || "");
+      selected.clear();
+      renderList(data);
+      msg.textContent = "";
+    } catch (err) {
+      if (err.status === 401) { renderLogin("会话已失效，请重新登录"); return; }
+      msg.className = "msg err";
+      msg.textContent = err.message;
+    }
+  };
+
+  const openFile = async (path) => {
+    try {
+      const data = await api("GET", "/api/v1/files/content?path=" + encodeURIComponent(path));
+      if (data.binary) {
+        window.location.href = "/api/v1/files/download?path=" + encodeURIComponent(path);
+        return;
+      }
+      const ta = el("textarea", { class: "editor", spellcheck: "false" });
+      ta.value = data.content;
+      const info = el("div", { class: "hint", text: data.size + " 字节 · UTF-8" });
+      const save = el("button", { text: "保存" });
+      const m = modal("编辑 " + path, [info, ta, el("div", { class: "row", style: "margin-top:12px" }, [save])]);
+      ta.style.height = "50vh";
+      save.addEventListener("click", async () => {
+        save.disabled = true;
+        try {
+          await api("PUT", "/api/v1/files/content", { path: path, content: ta.value });
+          m.close();
+          refresh();
+        } catch (e) {
+          alert(e.message);
+        } finally { save.disabled = false; }
+      });
+      setTimeout(() => ta.focus(), 50);
+    } catch (e) { alert(e.message); }
+  };
+
+  const rename = async (path) => {
+    const to = prompt("新路径（可含子目录）", path);
+    if (!to || to === path) return;
+    try {
+      await api("POST", "/api/v1/files/rename", { from: path, to: to, overwrite: false });
+      refresh();
+    } catch (e) { alert(e.message); }
+  };
+
+  const removePaths = async (paths) => {
+    if (!paths.length) return;
+    if (!confirm("将递归删除以下 " + paths.length + " 项，且不可恢复：\n\n" + paths.join("\n"))) return;
+    try {
+      await api("POST", "/api/v1/files/delete", { paths: paths, confirm: "DELETE" });
+      refresh();
+    } catch (e) { alert(e.message); }
+  };
+
+  const renderList = (data) => {
+    const rows = [];
+    if (data.parent !== "" || data.path !== "") {
+      const up = el("button", { class: "link", text: ".. 上一级", onclick: () => { cwd = data.parent; refresh(); } });
+      rows.push(el("tr", {}, [el("td", { colSpan: 5 }, [up])]));
+    }
+    for (const e of data.entries) {
+      const cb = el("input", { type: "checkbox" });
+      cb.addEventListener("change", () => {
+        if (cb.checked) selected.add(e.path); else selected.delete(e.path);
+      });
+      const name = el("span", { class: "file-name" + (e.is_dir ? " dir" : ""), text: e.name + (e.is_link ? " ↗" : "") });
+      name.addEventListener("click", () => {
+        if (e.is_dir) { cwd = e.path; refresh(); } else { openFile(e.path); }
+      });
+      const actions = el("div", { class: "row" }, [
+        e.is_dir ? null : el("button", { class: "link", text: "下载", onclick: () => {
+          window.location.href = "/api/v1/files/download?path=" + encodeURIComponent(e.path);
+        } }),
+        el("button", { class: "link", text: "重命名", onclick: () => rename(e.path) }),
+        el("button", { class: "link danger", text: "删除", onclick: () => removePaths([e.path]) }),
+      ]);
+      rows.push(el("tr", {}, [
+        el("td", { class: "check" }, [cb]),
+        el("td", {}, [name]),
+        el("td", { class: "mono", text: e.is_dir ? "—" : fmtBytes(e.size) }),
+        el("td", { class: "mono", text: fmtTime(e.mod_time) }),
+        el("td", {}, [actions]),
+      ]));
+    }
+    if (!rows.length) {
+      listBox.replaceChildren(emptyHint("空目录"));
+      return;
+    }
+    listBox.replaceChildren(simpleTable(["", "名称", "大小", "修改时间", "操作"], rows));
+  };
+
+  const toolbar = el("div", { class: "row wrap" }, [
+    el("button", { text: "上传文件", onclick: () => fileInput.click() }),
+    el("button", { class: "ghost", text: "新建目录", onclick: async () => {
+      const name = prompt("目录名");
+      if (!name) return;
+      try { await api("POST", "/api/v1/files/mkdir", { path: joinPath(cwd, name) }); refresh(); }
+      catch (e) { alert(e.message); }
+    } }),
+    el("button", { class: "ghost", text: "新建文件", onclick: async () => {
+      const name = prompt("文件名");
+      if (!name) return;
+      try { await api("PUT", "/api/v1/files/content", { path: joinPath(cwd, name), content: "" }); refresh(); }
+      catch (e) { alert(e.message); }
+    } }),
+    el("button", { class: "ghost", text: "打包选中", onclick: async () => {
+      const paths = Array.from(selected);
+      if (!paths.length) return alert("请先勾选文件");
+      const dest = prompt("压缩包保存路径", joinPath(cwd, "archive-" + Date.now() + ".tar.gz"));
+      if (!dest) return;
+      try { await api("POST", "/api/v1/files/archive", { paths: paths, dest: dest }); refresh(); }
+      catch (e) { alert(e.message); }
+    } }),
+    el("button", { class: "link danger", text: "删除选中", onclick: () => removePaths(Array.from(selected)) }),
+  ]);
+
+  fileInput.addEventListener("change", async () => {
+    if (!fileInput.files.length) return;
+    const fd = new FormData();
+    for (const f of fileInput.files) fd.append("file", f);
+    msg.className = "msg";
+    msg.textContent = "上传中…";
+    try {
+      const res = await fetch("/api/v1/files/upload?path=" + encodeURIComponent(cwd), {
+        method: "POST",
+        body: fd,
+        credentials: "same-origin",
+        headers: { "X-CSRF-Token": state.csrf || cookie("pv_csrf") },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.msg || "上传失败");
+      msg.textContent = "已上传 " + data.data.files.length + " 个文件";
+      fileInput.value = "";
+      refresh();
+    } catch (e) {
+      msg.className = "msg err";
+      msg.textContent = e.message;
+    }
+  });
+
+  root.replaceChildren(
+    card("文件管理", [
+      el("div", { class: "row wrap" }, [pathBar]),
+      toolbar,
+      msg,
+      listBox,
+      fileInput,
+    ]),
+  );
+  refresh();
+}
+
+function joinPath(base, name) {
+  return (base ? base.replace(/\/$/, "") + "/" : "") + name.replace(/^\/+/, "");
+}
+
+// ---------- Web 终端 ----------
+
+function stripAnsi(s) {
+  return s
+    .replace(/\x1b\][^\x07]*\x07/g, "")
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1b[()][A-Z0-9]/g, "")
+    .replace(/\r/g, "");
+}
+
+function renderTerminalView(root) {
+  const out = el("pre", { class: "term", tabindex: "0" });
+  const msg = el("div", { class: "msg" });
+  const cols = el("span", { class: "mono", text: "—" });
+  let ws = null;
+  let buffer = "";
+
+  const size = () => {
+    const rect = out.getBoundingClientRect();
+    const c = Math.max(40, Math.floor(rect.width / 7.4));
+    const r = Math.max(10, Math.floor(rect.height / 17));
+    cols.textContent = c + " × " + r;
+    return { c: c, r: r };
+  };
+
+  const append = (text) => {
+    buffer += text;
+    if (buffer.length > 300000) buffer = buffer.slice(-200000);
+    out.textContent = buffer;
+    out.scrollTop = out.scrollHeight;
+  };
+
+  const send = (s) => {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data: s }));
+  };
+
+  const connect = async () => {
+    if (ws) { try { ws.close(); } catch (_) {} ws = null; }
+    msg.className = "msg";
+    msg.textContent = "正在申请终端票据…";
+    try {
+      const t = await api("POST", "/api/v1/terminal/ticket", {});
+      const dim = size();
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      const url = proto + "://" + location.host + "/api/v1/terminal/ws?ticket=" +
+        encodeURIComponent(t.ticket) + "&cols=" + dim.c + "&rows=" + dim.r;
+      ws = new WebSocket(url);
+      ws.binaryType = "arraybuffer";
+      ws.onopen = () => {
+        msg.className = "msg ok";
+        msg.textContent = "已连接";
+        out.focus();
+      };
+      ws.onmessage = (ev) => {
+        if (typeof ev.data === "string") {
+          try {
+            const m = JSON.parse(ev.data);
+            if (m.type === "exit") { append("\n[会话结束]\n"); msg.textContent = "会话已结束"; }
+            if (m.type === "error") { msg.className = "msg err"; msg.textContent = m.data; }
+          } catch (_) { append(ev.data); }
+          return;
+        }
+        const text = new TextDecoder("utf-8").decode(new Uint8Array(ev.data));
+        append(stripAnsi(text));
+      };
+      ws.onclose = () => { msg.className = "msg"; msg.textContent = "连接已断开"; };
+      ws.onerror = () => { msg.className = "msg err"; msg.textContent = "WebSocket 连接失败"; };
+    } catch (e) {
+      msg.className = "msg err";
+      msg.textContent = e.message;
+    }
+  };
+
+  const keyMap = {
+    Enter: "\r", Backspace: "\x7f", Tab: "\t", Escape: "\x1b",
+    ArrowUp: "\x1b[A", ArrowDown: "\x1b[B", ArrowRight: "\x1b[C", ArrowLeft: "\x1b[D",
+    Home: "\x1b[H", End: "\x1b[F", Delete: "\x1b[3~", PageUp: "\x1b[5~", PageDown: "\x1b[6~",
+  };
+
+  out.addEventListener("keydown", (e) => {
+    if (e.ctrlKey && e.key.length === 1) {
+      const code = e.key.toUpperCase().charCodeAt(0) - 64;
+      if (code >= 0 && code < 32) {
+        e.preventDefault();
+        send(String.fromCharCode(code));
+        return;
+      }
+    }
+    if (keyMap[e.key]) { e.preventDefault(); send(keyMap[e.key]); return; }
+    if (e.key.length === 1) { e.preventDefault(); send(e.key); }
+  });
+
+  out.addEventListener("paste", (e) => {
+    e.preventDefault();
+    send(e.clipboardData.getData("text"));
+  });
+
+  window.addEventListener("resize", () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const dim = size();
+    ws.send(JSON.stringify({ type: "resize", cols: dim.c, rows: dim.r }));
+  });
+
+  root.replaceChildren(card("Web 终端", [
+    el("div", { class: "row wrap" }, [
+      el("button", { text: "连接", onclick: connect }),
+      el("button", { class: "ghost", text: "清屏", onclick: () => { buffer = ""; out.textContent = ""; } }),
+      el("span", { class: "hint", text: "尺寸 " }, [cols]),
+      el("span", { class: "hint", text: "点击黑框后即可输入；Ctrl+C 中断当前命令" }),
+    ]),
+    msg,
+    out,
+    el("div", { class: "hint", text: "终端默认关闭。启用方式：配置 terminal_enabled: true 后重启面板。会话最长 30 分钟，同时最多 2 个。" }),
+  ]));
+  setTimeout(connect, 100);
+}
+
+// ---------- 防火墙 ----------
+
+function renderFirewallView(root) {
+  const statusBox = el("div");
+  const rulesBox = el("div");
+  const bansBox = el("div");
+  const sshBox = el("div");
+  const msg = el("div", { class: "msg" });
+
+  const load = async () => {
+    try {
+      const data = await api("GET", "/api/v1/firewall");
+      const st = data.status;
+      statusBox.replaceChildren(
+        el("div", { class: "grid" }, [
+          statCard("后端", st.backend === "nft" ? "nftables" : st.backend === "iptables" ? "iptables-legacy" : "不可用",
+            st.supported ? "已就绪" : (st.reason || "")),
+          statCard("模式", st.whitelist ? "白名单（默认拒绝）" : "黑名单（默认放行）",
+            st.whitelist ? "仅放行已添加规则" : "未匹配流量放行"),
+          statCard("SSH 端口", (data.ssh_ports || []).join(", "), "始终优先放行"),
+          statCard("封禁数", String((st.bans || []).length), "nft set 自动到期"),
+        ]),
+        el("div", { class: "hint mono", text: "持久化文件：" + (data.persist_path || "-") }),
+      );
+
+      const rows = (data.rules || []).map((r) => {
+        const del = el("button", { class: "link danger", text: "删除", onclick: async () => {
+          if (!confirm("删除规则 #" + r.id + "？")) return;
+          try { await api("DELETE", "/api/v1/firewall/rules/" + r.id, {}); load(); }
+          catch (e) { alert(e.message); }
+        } });
+        return el("tr", {}, [
+          el("td", { class: "mono", text: "#" + r.id }),
+          el("td", {}, [badge(r.action === "accept" ? "放行" : "拒绝", r.action === "accept" ? "ok" : "err")]),
+          el("td", { text: r.proto }),
+          el("td", { class: "mono", text: r.port || "*" }),
+          el("td", { class: "mono", text: r.source || "任意" }),
+          el("td", { text: r.comment || "" }),
+          el("td", {}, [del]),
+        ]);
+      });
+      rulesBox.replaceChildren(rows.length ? simpleTable(["ID", "动作", "协议", "端口", "来源", "备注", ""], rows) : emptyHint("还没有规则"));
+
+      const bans = st.bans || [];
+      const banRows = bans.map((b) => el("tr", {}, [
+        el("td", { class: "mono", text: b.ip }),
+        el("td", { class: "mono", text: b.expires_at ? fmtTime(b.expires_at) : "手动" }),
+        el("td", {}, [el("button", { class: "link", text: "解封", onclick: async () => {
+          try { await api("DELETE", "/api/v1/firewall/bans/" + encodeURIComponent(b.ip), {}); load(); }
+          catch (e) { alert(e.message); }
+        } })]),
+      ]));
+      bansBox.replaceChildren(banRows.length ? simpleTable(["IP", "到期", ""], banRows) : emptyHint("当前没有封禁记录"));
+    } catch (e) {
+      msg.className = "msg err";
+      msg.textContent = e.message;
+    }
+  };
+
+  const loadSSH = async () => {
+    try {
+      const d = await api("GET", "/api/v1/security/ssh?minutes=10");
+      if (!d.supported) {
+        sshBox.replaceChildren(emptyHint(d.reason || "SSH 日志不可用（非 Linux 或没有 journalctl）"));
+        return;
+      }
+      const rows = (d.counts || []).slice(0, 10).map((c) => el("tr", {}, [
+        el("td", { class: "mono", text: c.ip }),
+        el("td", {}, [badge(String(c.count), c.count >= d.threshold ? "err" : "warn")]),
+        el("td", {}, [el("button", { class: "link", text: "封禁 " + d.ban_minutes + " 分钟", onclick: async () => {
+          try { await api("POST", "/api/v1/firewall/bans", { ip: c.ip, minutes: d.ban_minutes }); load(); }
+          catch (e) { alert(e.message); }
+        } })]),
+      ]));
+      sshBox.replaceChildren(
+        el("div", { class: "hint", text: "最近 10 分钟失败次数，阈值 " + d.threshold + " 次自动封禁 " + d.ban_minutes + " 分钟；防护当前" + (d.guard ? "已开启" : "已关闭") }),
+        rows.length ? simpleTable(["来源 IP", "失败次数", "操作"], rows) : emptyHint("最近没有 SSH 失败记录"),
+      );
+    } catch (e) {
+      sshBox.replaceChildren(emptyHint(e.message));
+    }
+  };
+
+  const addForm = el("form", { class: "row wrap" }, [
+    select([["accept", "放行"], ["drop", "拒绝"]], "accept"),
+    select([["tcp", "TCP"], ["udp", "UDP"], ["any", "全部"]], "tcp"),
+    el("input", { placeholder: "端口 80 或 8000-8100", style: "max-width:170px" }),
+    el("input", { placeholder: "来源 IP/CIDR（可空）", style: "max-width:200px" }),
+    el("input", { placeholder: "备注", style: "max-width:180px" }),
+    el("button", { type: "submit", text: "添加规则" }),
+  ]);
+  addForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const kids = addForm.querySelectorAll("select, input");
+    try {
+      await api("POST", "/api/v1/firewall/rules", {
+        action: kids[0].value, proto: kids[1].value,
+        port: kids[2].value.trim(), source: kids[3].value.trim(), comment: kids[4].value.trim(),
+      });
+      kids[2].value = ""; kids[3].value = ""; kids[4].value = "";
+      load();
+    } catch (err) { alert(err.message); }
+  });
+
+  const applyBtn = el("button", { text: "下发规则到内核", onclick: async () => {
+    if (!confirm("将重建 panelvps 表并立即生效。\nSSH 与面板端口会被自动放行。继续？")) return;
+    try {
+      const r = await api("POST", "/api/v1/firewall/apply", {});
+      msg.className = "msg ok";
+      msg.textContent = "已下发（" + r.backend + "），共 " + (r.ssh_ports || []).length + " 个 SSH 端口被强制放行";
+      load();
+    } catch (err) {
+      msg.className = "msg err";
+      msg.textContent = err.message;
+    }
+  } });
+
+  root.replaceChildren(
+    card("防火墙", [msg, statusBox, el("div", { class: "row", style: "margin-top:12px" }, [applyBtn])]),
+    card("规则", [addForm, rulesBox]),
+    card("手动封禁", [
+      (() => {
+        const ip = el("input", { placeholder: "IP 地址", style: "max-width:200px" });
+        const minutes = el("input", { placeholder: "分钟", value: "60", style: "max-width:100px" });
+        const btn = el("button", { text: "封禁", onclick: async () => {
+          try { await api("POST", "/api/v1/firewall/bans", { ip: ip.value.trim(), minutes: parseInt(minutes.value, 10) || 60 }); ip.value = ""; load(); }
+          catch (e) { alert(e.message); }
+        } });
+        return el("div", { class: "row wrap" }, [ip, minutes, btn]);
+      })(),
+      bansBox,
+    ]),
+    card("SSH 爆破防护", [sshBox]),
+  );
+  load();
+  loadSSH();
+}
+
+// ---------- 日志 ----------
+
+function renderLogsView(root) {
+  const sourceSel = select([], "panel");
+  const linesSel = select([["100", "100 行"], ["200", "200 行"], ["500", "500 行"], ["1000", "1000 行"]], "200");
+  const pre = el("pre", { class: "log tall", text: "" });
+  const msg = el("div", { class: "msg" });
+  const auto = el("input", { type: "checkbox" });
+  let timer = null;
+
+  const load = async () => {
+    msg.className = "msg";
+    msg.textContent = "读取中…";
+    try {
+      const d = await api("GET", "/api/v1/logs?source=" + encodeURIComponent(sourceSel.value) + "&lines=" + linesSel.value);
+      pre.textContent = (d.lines || []).join("\n") || "（无内容）";
+      pre.scrollTop = pre.scrollHeight;
+      msg.textContent = d.note || (d.has_more ? "已显示末尾 " + linesSel.value + " 行" : "");
+    } catch (e) {
+      msg.className = "msg err";
+      msg.textContent = e.message;
+    }
+  };
+
+  const setupAuto = () => {
+    if (state.timer) { clearInterval(state.timer); state.timer = null; }
+    if (auto.checked) state.timer = setInterval(load, 3000);
+  };
+
+  api("GET", "/api/v1/logs/sources").then((d) => {
+    sourceSel.replaceChildren.apply(sourceSel, (d.items || []).map((s) =>
+      el("option", { value: s.key, text: s.label + (s.present ? "" : "（不可用）") })));
+    load();
+  }).catch((e) => { msg.className = "msg err"; msg.textContent = e.message; });
+
+  sourceSel.addEventListener("change", load);
+  linesSel.addEventListener("change", load);
+  auto.addEventListener("change", setupAuto);
+
+  root.replaceChildren(card("日志", [
+    el("div", { class: "row wrap" }, [
+      sourceSel, linesSel,
+      el("button", { text: "刷新", onclick: load }),
+      el("label", { class: "row" }, [auto, el("span", { text: "自动刷新" })]),
+    ]),
+    msg, pre,
+  ]));
+}
+
+// ---------- 网站 ----------
+
+function renderSitesView(root) {
+  const banner = el("div", { class: "banner", style: "display:none" });
+  const listBox = el("div");
+  const msg = el("div", { class: "msg" });
+  let meta = { nginx: {}, root: "", email: "" };
+
+  const load = async () => {
+    try {
+      const d = await api("GET", "/api/v1/sites");
+      meta = d;
+      const n = d.nginx || {};
+      if (!n.ok) {
+        banner.style.display = "block";
+        banner.textContent = "Nginx 不可用：" + (n.message || "未安装或配置校验未通过") +
+          "。可到「商店」安装 Nginx 后再试。";
+      } else {
+        banner.style.display = "none";
+      }
+      const cards = (d.items || []).map((s) => siteCard(s, load));
+      listBox.replaceChildren(cards.length ? el("div", { class: "grid g2" }, cards) : emptyHint("还没有站点"));
+    } catch (e) {
+      msg.className = "msg err";
+      msg.textContent = e.message;
+    }
+  };
+
+  const newBtn = el("button", { text: "新建站点", onclick: () => siteForm(load, meta) });
+
+  root.replaceChildren(
+    card("网站", [
+      banner,
+      el("div", { class: "row wrap" }, [
+        newBtn,
+        el("button", { class: "ghost", text: "刷新", onclick: load }),
+        el("span", { class: "hint mono", text: "站点根目录：" + (meta.root || "/var/www") }),
+      ]),
+      msg,
+      listBox,
+    ]),
+  );
+  load();
+}
+
+function siteCard(s, reload) {
+  const sslBadge = s.ssl
+    ? badge("HTTPS · 到期 " + (s.cert_expiry || "?"), "ok")
+    : badge("HTTP", "warn");
+  const actions = el("div", { class: "row wrap" }, [
+    el("button", { class: "ghost", text: "重新下发", onclick: async () => {
+      try { await api("POST", "/api/v1/sites/" + s.id + "/apply", {}); reload(); }
+      catch (e) { alert(e.message); }
+    } }),
+    el("button", { class: "ghost", text: "查看配置", onclick: async () => {
+      try {
+        const d = await api("GET", "/api/v1/sites/" + s.id + "/preview");
+        const pre = el("pre", { class: "log tall", text: d.config });
+        modal("Nginx 配置 · " + d.path, [pre]);
+      } catch (e) { alert(e.message); }
+    } }),
+    s.ssl ? null : el("button", { class: "ghost", text: "申请证书", onclick: async () => {
+      if (!confirm("将为 " + s.domain + " 申请 Let's Encrypt 证书并启用 HTTPS。\n请确认域名已解析到本机且 80 端口可访问。")) return;
+      try {
+        const job = await api("POST", "/api/v1/sites/" + s.id + "/ssl", {});
+        watchJob(job, reload);
+      } catch (e) { alert(e.message); }
+    } }),
+    el("button", { class: "link danger", text: "删除", onclick: async () => {
+      if (!confirm("删除站点 " + s.domain + " 的 Nginx 配置？网站文件会保留。")) return;
+      try { await api("DELETE", "/api/v1/sites/" + s.id + "?confirm=1", {}); reload(); }
+      catch (e) { alert(e.message); }
+    } }),
+  ]);
+
+  return el("div", { class: "card site-card" }, [
+    el("div", { class: "row spread" }, [
+      el("div", {}, [el("h3", { text: s.domain }), el("div", { class: "hint mono", text: s.root })]),
+      sslBadge,
+    ]),
+    el("div", { class: "row wrap", style: "margin:10px 0" }, [
+      badge(s.kind === "php" ? "PHP " + s.php_version : "静态", "muted"),
+      badge("端口 " + s.port, "muted"),
+      badge(s.enabled ? "已启用" : "已停用", s.enabled ? "ok" : "warn"),
+    ]),
+    actions,
+  ]);
+}
+
+function siteForm(reload, meta) {
+  const name = el("input", { placeholder: "站点名（小写字母/数字/-）" });
+  const domain = el("input", { placeholder: "example.com" });
+  const kind = select([["static", "静态站点"], ["php", "PHP 站点"]], "static");
+  const php = el("input", { placeholder: "PHP 版本，如 8.2", value: "8.2" });
+  const port = el("input", { placeholder: "80", value: "80" });
+  const createRoot = el("input", { type: "checkbox" });
+  createRoot.checked = true;
+
+  const body = [
+    field("站点名", name, "会生成 panelvps-<name>.conf"),
+    field("域名", domain, "多个域名请分别建站"),
+    field("类型", kind),
+    field("PHP 版本", php, "仅 PHP 站点需要；需先安装对应 php-fpm"),
+    field("HTTP 端口", port),
+    el("label", { class: "row" }, [createRoot, el("span", { text: "同时创建站点目录与占位首页" })]),
+    el("div", { class: "hint", text: "站点根目录会落在 " + (meta.root || "/var/www") + " 之下；证书申请前请先让域名解析到本机。" }),
+    el("div", { class: "msg err" }),
+  ];
+  const submit = el("button", { text: "创建并下发" });
+  const m = modal("新建站点", body.concat([el("div", { class: "row", style: "margin-top:14px" }, [submit])]));
+  const errBox = body[body.length - 1];
+
+  submit.addEventListener("click", async () => {
+    submit.disabled = true;
+    try {
+      await api("POST", "/api/v1/sites", {
+        name: name.value.trim(), domain: domain.value.trim(), kind: kind.value,
+        php_version: php.value.trim(), port: parseInt(port.value, 10) || 80,
+        create_root: createRoot.checked,
+      });
+      m.close();
+      reload();
+    } catch (e) {
+      errBox.textContent = e.message;
+    } finally { submit.disabled = false; }
+  });
+}
+
+// ---------- 软件商店 ----------
+
+function renderStoreView(root) {
+  const search = el("input", { placeholder: "搜索软件…", style: "max-width:240px" });
+  const cat = select([["", "全部类别"]], "");
+  const grid = el("div", { class: "grid g2" });
+  const msg = el("div", { class: "msg" });
+  let all = [];
+  let supported = true;
+
+  const paint = () => {
+    const q = search.value.trim().toLowerCase();
+    const c = cat.value;
+    const items = all.filter((m) =>
+      (!c || m.category === c) &&
+      (!q || (m.name + " " + m.slug + " " + m.summary).toLowerCase().includes(q)));
+    if (!items.length) { grid.replaceChildren(emptyHint("没有匹配的软件")); return; }
+    grid.replaceChildren.apply(grid, items.map((m) => storeCard(m, supported, () => load())));
+  };
+
+  const load = async () => {
+    try {
+      const d = await api("GET", "/api/v1/store");
+      all = d.items || [];
+      supported = d.supported;
+      if (!supported) {
+        msg.className = "msg err";
+        msg.textContent = d.reason;
+      }
+      const cats = Array.from(new Set(all.map((m) => m.category)));
+      cat.replaceChildren(el("option", { value: "", text: "全部类别" }),
+        ...cats.map((k) => el("option", { value: k, text: k })));
+      paint();
+    } catch (e) {
+      msg.className = "msg err";
+      msg.textContent = e.message;
+    }
+  };
+
+  search.addEventListener("input", paint);
+  cat.addEventListener("change", paint);
+
+  root.replaceChildren(card("软件商店", [
+    el("div", { class: "hint", text: "清单是声明式的（apt / 下载 / 解压 / 写文件 / 路径 / 服务 / 校验），不含自由脚本。安装会真实调用 apt，可能需要几分钟。" }),
+    el("div", { class: "row wrap" }, [search, cat, el("button", { class: "ghost", text: "刷新", onclick: load })]),
+    msg, grid,
+  ]));
+  load();
+}
+
+const riskText = { low: "低风险", medium: "中风险", high: "高风险" };
+
+function storeCard(m, supported, reload) {
+  const acts = el("div", { class: "row wrap" }, [
+    el("button", { class: "ghost", text: "查看步骤", onclick: async () => {
+      try {
+        const d = await api("GET", "/api/v1/store/" + m.slug + "/plan?mode=install");
+        const lines = (d.steps || []).map((s) => "• " + s).join("\n");
+        modal(m.name + " · 安装步骤", [
+          el("pre", { class: "log", text: lines || "（无）" }),
+          el("div", { class: "hint", text: "这些步骤会以 root 身份真实执行；失败时自动尝试回滚。" }),
+        ]);
+      } catch (e) { alert(e.message); }
+    } }),
+  ]);
+
+  if (m.installed) {
+    acts.appendChild(el("button", { class: "ghost danger", text: "卸载", onclick: async () => {
+      if (!confirm("卸载 " + m.name + "？会停止服务并 purge 相关软件包。")) return;
+      try {
+        const job = await api("POST", "/api/v1/store/" + m.slug + "/uninstall", {});
+        watchJob(job, reload);
+      } catch (e) { alert(e.message); }
+    } }));
+  } else {
+    acts.appendChild(el("button", { text: supported ? "安装" : "仅 Linux 可安装", onclick: async () => {
+      if (!supported) return alert("软件商店仅能在 Linux 服务器上执行安装");
+      if (m.risk === "high" && !confirm("该软件标记为高风险：" + (m.warning || "") + "\n\n仍要继续？")) return;
+      else if (m.risk !== "high" && !confirm("安装 " + m.name + "？预计占用内存 " + m.memory_mb + "MB。")) return;
+      try {
+        const job = await api("POST", "/api/v1/store/" + m.slug + "/install", { force: false });
+        watchJob(job, reload);
+      } catch (e) { alert(e.message); }
+    } }));
+  }
+
+  return el("div", { class: "card store-card" }, [
+    el("div", { class: "row spread" }, [
+      el("div", {}, [el("h3", { text: m.name }), el("div", { class: "hint mono", text: m.slug + " · " + m.version })]),
+      m.installed ? badge("已安装", "ok") : badge(riskText[m.risk] || m.risk, m.risk === "high" ? "err" : m.risk === "medium" ? "warn" : "muted"),
+    ]),
+    el("p", { class: "sub", text: m.summary }),
+    el("div", { class: "row wrap", style: "margin:8px 0" }, [
+      badge("内存 " + m.memory_mb + "MB", "muted"),
+      badge("磁盘 " + m.disk_mb + "MB", "muted"),
+      m.ports && m.ports.length ? badge("端口 " + m.ports.join("/"), "muted") : null,
+      m.installed && m.installed_version ? badge("版本 " + m.installed_version, "muted") : null,
+    ]),
+    m.warning ? el("div", { class: "warn-box", text: m.warning }) : null,
+    acts,
+  ]);
+}
+
+// ---------- 备份 ----------
+
+function renderBackupView(root) {
+  const listBox = el("div");
+  const msg = el("div", { class: "msg" });
+  const note = el("input", { placeholder: "备注（可选）", style: "max-width:280px" });
+
+  const load = async () => {
+    try {
+      const d = await api("GET", "/api/v1/backups");
+      const rows = (d.items || []).map((f) => el("tr", {}, [
+        el("td", { class: "mono", text: f.name }),
+        el("td", { class: "mono", text: fmtBytes(f.size) }),
+        el("td", { class: "mono", text: fmtTime(f.mod_time) }),
+        el("td", {}, [el("div", { class: "row wrap" }, [
+          el("button", { class: "link", text: "下载", onclick: () => {
+            window.location.href = "/api/v1/backups/" + encodeURIComponent(f.name) + "/download";
+          } }),
+          el("button", { class: "link", text: "恢复", onclick: async () => {
+            if (!confirm("恢复会用备份中的数据库覆盖当前数据，并重启面板。\n当前状态会先自动备份一份。\n\n确定恢复 " + f.name + "？")) return;
+            try {
+              const r = await api("POST", "/api/v1/backups/" + encodeURIComponent(f.name) + "/restore", { confirm: "RESTORE" });
+              msg.className = "msg ok";
+              msg.textContent = r.message || "已开始恢复";
+              if (r.restart_required) setTimeout(() => location.reload(), 8000);
+            } catch (e) { alert(e.message); }
+          } }),
+          el("button", { class: "link danger", text: "删除", onclick: async () => {
+            if (!confirm("删除备份 " + f.name + "？")) return;
+            try { await api("DELETE", "/api/v1/backups/" + encodeURIComponent(f.name), {}); load(); }
+            catch (e) { alert(e.message); }
+          } }),
+        ])]),
+      ]));
+      listBox.replaceChildren(
+        rows.length ? simpleTable(["文件", "大小", "时间", "操作"], rows) : emptyHint("还没有备份"),
+        el("div", { class: "hint", text: "备份目录：" + (d.dir || "-") + "，自动保留最近 " + (d.keep || 30) + " 份" }),
+      );
+    } catch (e) {
+      msg.className = "msg err";
+      msg.textContent = e.message;
+    }
+  };
+
+  root.replaceChildren(card("备份与恢复", [
+    el("div", { class: "row wrap" }, [
+      note,
+      el("button", { text: "立即备份", onclick: async () => {
+        try {
+          const job = await api("POST", "/api/v1/backups", { note: note.value.trim() });
+          note.value = "";
+          watchJob(job, load);
+        } catch (e) { alert(e.message); }
+      } }),
+      el("button", { class: "ghost", text: "刷新", onclick: load }),
+    ]),
+    el("div", { class: "hint", text: "备份包含数据库一致性快照（VACUUM INTO）、配置文件与版本信息；不包含网站文件与 Xray 二进制。" }),
+    msg, listBox,
+  ]));
+  load();
+}
+
+// ---------- 设置 ----------
+
+function renderSettingsView(root) {
+  const msg = el("div", { class: "msg" });
+  const host = el("input", { placeholder: "服务器公网 IP 或域名" });
+  const webhook = el("input", { placeholder: "https://example.com/webhook" });
+  const guard = el("input", { type: "checkbox" });
+  const threshold = el("input", { placeholder: "5", style: "max-width:100px" });
+  const info = el("tbody");
+  const updateBox = el("div");
+
+  const load = async () => {
+    try {
+      const d = await api("GET", "/api/v1/settings");
+      host.value = d.public_host || "";
+      webhook.value = d.alert_webhook || "";
+      guard.checked = !!(d.ssh_guard && d.ssh_guard.enabled);
+      threshold.value = d.ssh_guard ? d.ssh_guard.threshold : 5;
+      const p = d.panel || {};
+      const rows = [
+        ["面板版本", p.version], ["监听地址", p.listen + (p.loopback ? "（仅本机）" : "（对外）")],
+        ["数据目录", p.data_dir], ["数据库", p.db_path],
+        ["文件根目录", p.file_root], ["站点根目录", p.sites_root],
+        ["Nginx 配置", p.nginx_conf], ["备份目录", p.backup_dir],
+        ["证书邮箱", p.cert_email || "未设置"], ["Web 终端", p.terminal_enabled ? "已启用" : "已关闭"],
+        ["更新仓库", p.update_repo], ["配置文件", p.config_path || "-"],
+      ];
+      info.replaceChildren.apply(info, rows.map(([k, v]) =>
+        el("tr", {}, [el("th", { text: k }), el("td", { class: "mono", text: String(v || "-") })])));
+      paintUpdate(d.update);
+    } catch (e) {
+      msg.className = "msg err";
+      msg.textContent = e.message;
+    }
+  };
+
+  const paintUpdate = (u) => {
+    if (!u) {
+      updateBox.replaceChildren(el("div", { class: "hint", text: "尚未检查更新" }));
+      return;
+    }
+    const body = [
+      el("div", { class: "row wrap" }, [
+        badge("当前 " + u.current, "muted"),
+        u.available ? badge("可更新到 " + u.latest, "ok") : badge("已是最新", "ok"),
+        el("span", { class: "hint", text: "检查于 " + fmtTime(u.checked_at) }),
+      ]),
+    ];
+    if (u.notes) body.push(el("pre", { class: "log", text: u.notes }));
+    if (u.available) {
+      body.push(el("div", { class: "row", style: "margin-top:10px" }, [
+        el("button", { text: "下载并替换二进制", onclick: async () => {
+          if (!confirm("将下载 " + u.asset_name + "（" + fmtBytes(u.asset_size) + "）并替换当前二进制。\n替换后需要重启面板才能生效。")) return;
+          try {
+            const job = await api("POST", "/api/v1/updates/apply", { tag: u.latest });
+            watchJob(job, null);
+          } catch (e) { alert(e.message); }
+        } }),
+      ]));
+    }
+    updateBox.replaceChildren.apply(updateBox, body);
+  };
+
+  const save = el("button", { text: "保存设置", onclick: async () => {
+    msg.className = "msg";
+    msg.textContent = "保存中…";
+    try {
+      await api("PUT", "/api/v1/settings", {
+        public_host: host.value.trim(),
+        alert_webhook: webhook.value.trim(),
+        ssh_guard_enabled: guard.checked,
+        ssh_guard_threshold: parseInt(threshold.value, 10) || 5,
+      });
+      msg.className = "msg ok";
+      msg.textContent = "已保存";
+      load();
+    } catch (e) {
+      msg.className = "msg err";
+      msg.textContent = e.message;
+    }
+  } });
+
+  const restart = el("button", { class: "ghost danger", text: "重启面板", onclick: async () => {
+    if (!confirm("重启 panelvps 服务？网站与代理不会中断，面板会断开约 3 秒。")) return;
+    try {
+      await api("POST", "/api/v1/system/restart", { confirm: "RESTART" });
+      msg.className = "msg ok";
+      msg.textContent = "正在重启，5 秒后自动刷新…";
+      setTimeout(() => location.reload(), 5000);
+    } catch (e) { alert(e.message); }
+  } });
+
+  root.replaceChildren(
+    card("基本设置", [
+      field("公网地址", host, "用于生成分享链接；可填 IP 或域名"),
+      field("告警 Webhook", webhook, "留空则关闭。事件以 JSON POST 推送，5 分钟内相同标题只发一次"),
+      el("label", { class: "row" }, [guard, el("span", { text: "启用 SSH 爆破自动封禁" })]),
+      field("失败次数阈值", threshold, "窗口 " + "10 分钟（配置项 ssh_guard_window）"),
+      el("div", { class: "row wrap" }, [save, restart]),
+      msg,
+    ]),
+    card("运行参数", [el("table", {}, [info])]),
+    card("版本更新", [
+      el("div", { class: "row wrap" }, [
+        el("button", { text: "检查更新", onclick: async () => {
+          updateBox.replaceChildren(el("div", { class: "hint", text: "检查中…" }));
+          try { paintUpdate(await api("POST", "/api/v1/updates/check", {})); }
+          catch (e) { updateBox.replaceChildren(el("div", { class: "msg err", text: e.message })); }
+        } }),
+        el("span", { class: "hint", text: "从 GitHub Release 下载，校验 sha256 后原子替换，保留上一版" }),
+      ]),
+      updateBox,
+    ]),
+  );
+  load();
+}
+
+// ---------- 任务进度 ----------
+
+function watchJob(job, onDone) {
+  const logBox = el("pre", { class: "log tall", text: "排队中…" });
+  const m = modal("执行中 · " + (job.target || job.kind), [logBox]);
+  const timer = setInterval(async () => {
+    try {
+      const j = await api("GET", "/api/v1/system/jobs/" + job.id);
+      logBox.textContent = j.log || "…";
+      logBox.scrollTop = logBox.scrollHeight;
+      if (j.status !== "running") {
+        clearInterval(timer);
+        const h = m.box.querySelector("h3");
+        if (h) h.textContent = j.status === "ok" ? "完成" : "失败";
+        if (j.error) logBox.textContent += "\n\n错误：" + j.error;
+        if (onDone) onDone(j);
+      }
+    } catch (e) {
+      clearInterval(timer);
+      if (e.status === 401) renderLogin("会话已失效，请重新登录");
+    }
+  }, 1200);
+  return m;
 }
 
 // ---------- 启动 ----------

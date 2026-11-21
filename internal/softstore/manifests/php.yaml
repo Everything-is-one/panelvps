@@ -1,0 +1,24 @@
+slug: php
+name: PHP 8.2 (FPM)
+category: runtime
+summary: PHP-FPM 运行时，含 MySQL、mbstring、curl、xml、zip 扩展
+version: "8.2"
+memory_mb: 40
+disk_mb: 180
+ports: []
+deps: [nginx]
+conflicts: []
+risk: low
+warning: 面板不安装 MySQL 服务端；需要数据库时请单独安装 mariadb。
+plan:
+  install:
+    - apt:
+        names: [php8.2-fpm, php8.2-cli, php8.2-mysql, php8.2-curl, php8.2-mbstring, php8.2-xml, php8.2-zip]
+        update: true
+    - service: { name: php8.2-fpm, enable: true, start: true }
+    - check: { cmd: ["php", "-v"] }
+  uninstall:
+    - service: { name: php8.2-fpm, stop: true, disable: true }
+    - apt:
+        names: [php8.2-fpm, php8.2-cli, php8.2-mysql, php8.2-curl, php8.2-mbstring, php8.2-xml, php8.2-zip]
+        purge: true

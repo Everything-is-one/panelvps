@@ -1,0 +1,20 @@
+slug: nginx
+name: Nginx
+category: web
+summary: 高性能 Web 服务器与反向代理，站点管理模块的运行时依赖
+version: "1.22"
+memory_mb: 8
+disk_mb: 60
+ports: [80, 443]
+deps: []
+conflicts: [apache2, caddy]
+risk: low
+warning: ""
+plan:
+  install:
+    - apt: { names: [nginx], update: true }
+    - service: { name: nginx, enable: true, start: true }
+    - check: { cmd: ["nginx", "-t"] }
+  uninstall:
+    - service: { name: nginx, stop: true, disable: true }
+    - apt: { names: [nginx], purge: true }

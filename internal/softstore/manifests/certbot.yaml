@@ -1,0 +1,18 @@
+slug: certbot
+name: Certbot
+category: security
+summary: Let's Encrypt 证书签发与自动续期
+version: "2.x"
+memory_mb: 30
+disk_mb: 40
+ports: []
+deps: []
+conflicts: []
+risk: low
+warning: 签发前请确认域名已解析到本机，且 80 端口可从公网访问。
+plan:
+  install:
+    - apt: { names: [certbot], update: true }
+    - check: { cmd: ["certbot", "--version"] }
+  uninstall:
+    - apt: { names: [certbot], purge: true }

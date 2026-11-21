@@ -1,0 +1,20 @@
+slug: redis
+name: Redis
+category: database
+summary: 内存键值存储，常用作缓存与队列
+version: "7.0"
+memory_mb: 15
+disk_mb: 40
+ports: [6379]
+deps: []
+conflicts: [redis]
+risk: medium
+warning: 默认只监听 127.0.0.1 且无密码，请勿直接把 6379 暴露到公网。
+plan:
+  install:
+    - apt: { names: [redis-server], update: true }
+    - service: { name: redis-server, enable: true, start: true }
+    - check: { cmd: ["redis-server", "--version"] }
+  uninstall:
+    - service: { name: redis-server, stop: true, disable: true }
+    - apt: { names: [redis-server], purge: true }

@@ -52,6 +52,36 @@ type Config struct {
 	// PublicHost 分享链接使用的公网地址或域名；留空时从访问来源推断。
 	PublicHost string `yaml:"public_host"`
 
+	// SitesRoot 网站根目录的父目录，所有站点必须落在它下面。
+	SitesRoot string `yaml:"sites_root"`
+	// NginxConfDir 由面板托管的 Nginx 站点配置目录。
+	NginxConfDir string `yaml:"nginx_conf_dir"`
+	// NginxBin Nginx 可执行文件，用于 -t 校验与 reload。
+	NginxBin string `yaml:"nginx_bin"`
+	// AcmeWebRoot ACME HTTP-01 校验目录。
+	AcmeWebRoot string `yaml:"acme_webroot"`
+	// CertEmail 申请证书用的邮箱。
+	CertEmail string `yaml:"cert_email"`
+
+	// BackupDir 备份文件目录，默认为 <data_dir>/backups。
+	BackupDir string `yaml:"backup_dir"`
+	// AlertWebhook 告警推送地址（POST JSON），留空则不推送。
+	AlertWebhook string `yaml:"alert_webhook"`
+	// SSHGuardEnabled 是否启用 SSH 爆破检测与自动封禁。
+	SSHGuardEnabled bool `yaml:"ssh_guard_enabled"`
+	// SSHGuardThreshold 窗口内失败次数阈值。
+	SSHGuardThreshold int `yaml:"ssh_guard_threshold"`
+	// SSHGuardWindow 统计窗口，如 "10m"。
+	SSHGuardWindow string `yaml:"ssh_guard_window"`
+	// SSHGuardBan 封禁时长，如 "1h"。
+	SSHGuardBan string `yaml:"ssh_guard_ban"`
+	// SSHPorts 允许的 SSH 端口，防火墙模块会强制放行，避免把自己锁在外面。
+	SSHPorts []int `yaml:"ssh_ports"`
+	// UpdateRepo 自更新的 GitHub 仓库，形如 owner/repo。
+	UpdateRepo string `yaml:"update_repo"`
+	// TerminalShell Web 终端使用的 shell。
+	TerminalShell string `yaml:"terminal_shell"`
+
 	// path 记录配置文件自身位置，便于回写默认配置。
 	path string
 }
@@ -73,6 +103,21 @@ func Default() *Config {
 		XrayBin:         "",
 		XrayAPIPort:     10085,
 		PublicHost:      "",
+
+		SitesRoot:         "/var/www",
+		NginxConfDir:      "/etc/nginx/conf.d",
+		NginxBin:          "nginx",
+		AcmeWebRoot:       "/var/www/_acme",
+		CertEmail:         "",
+		BackupDir:         "",
+		AlertWebhook:      "",
+		SSHGuardEnabled:   true,
+		SSHGuardThreshold: 5,
+		SSHGuardWindow:    "10m",
+		SSHGuardBan:       "1h",
+		SSHPorts:          []int{22},
+		UpdateRepo:        "Everything-is-one/panelvps",
+		TerminalShell:     "/bin/bash",
 	}
 }
 
@@ -130,6 +175,39 @@ func (c *Config) applyDefaults() {
 	if c.XrayConfDir == "" {
 		c.XrayConfDir = "xray"
 	}
+	if c.SitesRoot == "" {
+		c.SitesRoot = "/var/www"
+	}
+	if c.NginxConfDir == "" {
+		c.NginxConfDir = "/etc/nginx/conf.d"
+	}
+	if c.NginxBin == "" {
+		c.NginxBin = "nginx"
+	}
+	if c.AcmeWebRoot == "" {
+		c.AcmeWebRoot = "/var/www/_acme"
+	}
+	if c.BackupDir == "" {
+		c.BackupDir = "backups"
+	}
+	if c.SSHGuardThreshold <= 0 {
+		c.SSHGuardThreshold = 5
+	}
+	if c.SSHGuardWindow == "" {
+		c.SSHGuardWindow = "10m"
+	}
+	if c.SSHGuardBan == "" {
+		c.SSHGuardBan = "1h"
+	}
+	if len(c.SSHPorts) == 0 {
+		c.SSHPorts = []int{22}
+	}
+	if c.TerminalShell == "" {
+		c.TerminalShell = "/bin/bash"
+	}
+	if c.UpdateRepo == "" {
+		c.UpdateRepo = "Everything-is-one/panelvps"
+	}
 }
 
 // Validate 做启动前校验，宁可启动失败也不要带病运行。
@@ -172,7 +250,50 @@ func (c *Config) Validate() error {
 	if !filepath.IsAbs(c.XrayConfDir) {
 		c.XrayConfDir = filepath.Join(c.DataDir, c.XrayConfDir)
 	}
+	if !filepath.IsAbs(c.BackupDir) {
+		c.BackupDir = filepath.Join(c.DataDir, c.BackupDir)
+	}
+	if !filepath.IsAbs(c.SitesRoot) {
+		abs, err := filepath.Abs(c.SitesRoot)
+		if err != nil {
+			return fmt.Errorf("sites_root 无法解析: %w", err)
+		}
+		c.SitesRoot = abs
+	}
+	for _, p := range c.SSHPorts {
+		if p < 1 || p > 65535 {
+			return fmt.Errorf("ssh_ports 含非法端口: %d", p)
+		}
+	}
+	for _, item := range []struct{ name, val string }{
+		{"ssh_guard_window", c.SSHGuardWindow},
+		{"ssh_guard_ban", c.SSHGuardBan},
+	} {
+		d, err := time.ParseDuration(item.val)
+		if err != nil || d <= 0 {
+			return fmt.Errorf("%s 解析失败: %q", item.name, item.val)
+		}
+	}
+	if c.UpdateRepo != "" {
+		parts := strings.Split(c.UpdateRepo, "/")
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return fmt.Errorf("update_repo 应形如 owner/repo，当前为 %q", c.UpdateRepo)
+		}
+	}
 	return nil
+}
+
+// SSHGuardDurations 返回解析后的窗口与封禁时长。
+func (c *Config) SSHGuardDurations() (window, ban time.Duration, err error) {
+	window, err = time.ParseDuration(c.SSHGuardWindow)
+	if err != nil {
+		return 0, 0, err
+	}
+	ban, err = time.ParseDuration(c.SSHGuardBan)
+	if err != nil {
+		return 0, 0, err
+	}
+	return window, ban, nil
 }
 
 // SessionTTLDuration 把字符串形式的 TTL 解析为 time.Duration。
@@ -202,8 +323,10 @@ func (c *Config) Save(path string) error {
 	return os.WriteFile(path, body, 0o600)
 }
 
-// IsLoopback 判断当前监听是否只对本机开放。
-// 首页与安装脚本据此决定是否提示「面板已暴露在公网」。
+// Path 返回配置文件自身路径，备份时用于一并打包。
+func (c *Config) Path() string { return c.path }
+
+// IsLoopback 判断当前监听是否只对本机开放。// 首页与安装脚本据此决定是否提示「面板已暴露在公网」。
 func (c *Config) IsLoopback() bool {
 	host, _, err := net.SplitHostPort(c.Listen)
 	if err != nil {

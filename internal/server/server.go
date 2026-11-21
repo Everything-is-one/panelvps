@@ -10,11 +10,18 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Everything-is-one/panelvps/internal/auth"
+	"github.com/Everything-is-one/panelvps/internal/backup"
 	"github.com/Everything-is-one/panelvps/internal/config"
+	"github.com/Everything-is-one/panelvps/internal/filemgr"
+	"github.com/Everything-is-one/panelvps/internal/jobs"
 	"github.com/Everything-is-one/panelvps/internal/metrics"
+	"github.com/Everything-is-one/panelvps/internal/notify"
+	"github.com/Everything-is-one/panelvps/internal/sites"
+	"github.com/Everything-is-one/panelvps/internal/softstore"
 	"github.com/Everything-is-one/panelvps/internal/store"
 	"github.com/Everything-is-one/panelvps/internal/xray"
 	"github.com/Everything-is-one/panelvps/web"
@@ -49,6 +56,20 @@ type Server struct {
 	startAt  time.Time
 	dummyPwd string
 	xr       *xray.Manager
+
+	files    *filemgr.Manager
+	sites    *sites.Manager
+	appstore *softstore.Store
+	backups  *backup.Manager
+	notifier *notify.Notifier
+	jobs     *jobs.Manager
+
+	termMu     sync.Mutex
+	termTicket map[string]time.Time
+	termActive int
+
+	updMu   sync.Mutex
+	updInfo *updateInfo
 }
 
 // New 构造 Server 并注册路由。
@@ -84,6 +105,36 @@ func New(cfg *config.Config, st *store.Store, logger *slog.Logger) (*Server, err
 	}
 	s.xr = xray.NewManager(bin, cfg.XrayConfDir, cfg.XrayAPIPort, "warning", logger)
 
+	// 运维模块：任何一个初始化失败都只降级对应功能，不阻止面板启动。
+	if fm, err := filemgr.New(cfg.FileRoot); err != nil {
+		logger.Warn("文件管理不可用", "root", cfg.FileRoot, "err", err)
+	} else {
+		s.files = fm
+	}
+	s.sites = &sites.Manager{
+		ConfDir:     cfg.NginxConfDir,
+		SitesRoot:   cfg.SitesRoot,
+		NginxBin:    cfg.NginxBin,
+		AcmeWebRoot: cfg.AcmeWebRoot,
+	}
+	if apps, err := softstore.Load(); err != nil {
+		logger.Error("软件商店清单加载失败", "err", err)
+	} else {
+		s.appstore = apps
+	}
+	if bm, err := backup.New(cfg.BackupDir, cfg.DataDir); err != nil {
+		logger.Warn("备份模块不可用", "err", err)
+	} else {
+		s.backups = bm
+	}
+	if n, err := notify.New(cfg.AlertWebhook, logger); err != nil {
+		logger.Warn("告警 Webhook 配置无效，已禁用", "err", err)
+	} else {
+		s.notifier = n
+	}
+	s.jobs = jobs.New(60, 2)
+	s.termTicket = map[string]time.Time{}
+
 	s.routes()
 	return s, nil
 }
@@ -112,6 +163,76 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/proxies/clients/{id}/reset", s.requireAuth(s.handleResetClientTraffic))
 	s.mux.HandleFunc("GET /api/v1/proxies/clients/{id}/links", s.requireAuth(s.handleClientLinks))
 	s.mux.HandleFunc("GET /api/v1/proxies/clients/{id}/qr", s.requireAuth(s.handleQR))
+
+	// 系统运维
+	s.mux.HandleFunc("GET /api/v1/system/info", s.requireAuth(s.handleSystemInfo))
+	s.mux.HandleFunc("GET /api/v1/system/processes", s.requireAuth(s.handleProcesses))
+	s.mux.HandleFunc("GET /api/v1/system/services", s.requireAuth(s.handleServices))
+	s.mux.HandleFunc("POST /api/v1/system/services/{name}/actions/{action}", s.requireAuth(s.handleServiceAction))
+	s.mux.HandleFunc("GET /api/v1/system/ports", s.requireAuth(s.handlePorts))
+	s.mux.HandleFunc("POST /api/v1/system/restart", s.requireAuth(s.handleRestart))
+	s.mux.HandleFunc("GET /api/v1/system/jobs", s.requireAuth(s.handleJobs))
+	s.mux.HandleFunc("GET /api/v1/system/jobs/{id}", s.requireAuth(s.handleJob))
+	s.mux.HandleFunc("GET /api/v1/audit", s.requireAuth(s.handleAuditList))
+
+	// 文件
+	s.mux.HandleFunc("GET /api/v1/files", s.requireAuth(s.handleFileList))
+	s.mux.HandleFunc("GET /api/v1/files/stat", s.requireAuth(s.handleFileStat))
+	s.mux.HandleFunc("GET /api/v1/files/content", s.requireAuth(s.handleFileRead))
+	s.mux.HandleFunc("PUT /api/v1/files/content", s.requireAuth(s.handleFileWrite))
+	s.mux.HandleFunc("GET /api/v1/files/download", s.requireAuth(s.handleFileDownload))
+	s.mux.HandleFunc("POST /api/v1/files/upload", s.requireAuth(s.handleFileUpload))
+	s.mux.HandleFunc("POST /api/v1/files/mkdir", s.requireAuth(s.handleFileMkdir))
+	s.mux.HandleFunc("POST /api/v1/files/rename", s.requireAuth(s.handleFileRename))
+	s.mux.HandleFunc("POST /api/v1/files/copy", s.requireAuth(s.handleFileCopy))
+	s.mux.HandleFunc("POST /api/v1/files/delete", s.requireAuth(s.handleFileDelete))
+	s.mux.HandleFunc("POST /api/v1/files/archive", s.requireAuth(s.handleFileArchive))
+	s.mux.HandleFunc("POST /api/v1/files/extract", s.requireAuth(s.handleFileExtract))
+
+	// 终端
+	s.mux.HandleFunc("POST /api/v1/terminal/ticket", s.requireAuth(s.handleTerminalTicket))
+	s.mux.HandleFunc("GET /api/v1/terminal/ws", s.handleTerminalWS)
+
+	// 防火墙与安全
+	s.mux.HandleFunc("GET /api/v1/firewall", s.requireAuth(s.handleFirewallStatus))
+	s.mux.HandleFunc("POST /api/v1/firewall/rules", s.requireAuth(s.handleFirewallCreate))
+	s.mux.HandleFunc("DELETE /api/v1/firewall/rules/{id}", s.requireAuth(s.handleFirewallDelete))
+	s.mux.HandleFunc("POST /api/v1/firewall/apply", s.requireAuth(s.handleFirewallApply))
+	s.mux.HandleFunc("POST /api/v1/firewall/bans", s.requireAuth(s.handleBanCreate))
+	s.mux.HandleFunc("DELETE /api/v1/firewall/bans/{ip}", s.requireAuth(s.handleBanDelete))
+	s.mux.HandleFunc("GET /api/v1/security/ssh", s.requireAuth(s.handleSSHReport))
+
+	// 日志
+	s.mux.HandleFunc("GET /api/v1/logs/sources", s.requireAuth(s.handleLogSources))
+	s.mux.HandleFunc("GET /api/v1/logs", s.requireAuth(s.handleLogs))
+
+	// 网站
+	s.mux.HandleFunc("GET /api/v1/sites", s.requireAuth(s.handleSiteList))
+	s.mux.HandleFunc("POST /api/v1/sites", s.requireAuth(s.handleSiteCreate))
+	s.mux.HandleFunc("GET /api/v1/sites/{id}/preview", s.requireAuth(s.handleSitePreview))
+	s.mux.HandleFunc("PATCH /api/v1/sites/{id}", s.requireAuth(s.handleSiteUpdate))
+	s.mux.HandleFunc("DELETE /api/v1/sites/{id}", s.requireAuth(s.handleSiteDelete))
+	s.mux.HandleFunc("POST /api/v1/sites/{id}/apply", s.requireAuth(s.handleSiteApply))
+	s.mux.HandleFunc("POST /api/v1/sites/{id}/ssl", s.requireAuth(s.handleSiteSSL))
+
+	// 软件商店
+	s.mux.HandleFunc("GET /api/v1/store", s.requireAuth(s.handleStoreList))
+	s.mux.HandleFunc("GET /api/v1/store/{slug}/plan", s.requireAuth(s.handleStorePlan))
+	s.mux.HandleFunc("POST /api/v1/store/{slug}/install", s.requireAuth(s.handleStoreInstall))
+	s.mux.HandleFunc("POST /api/v1/store/{slug}/uninstall", s.requireAuth(s.handleStoreUninstall))
+
+	// 备份
+	s.mux.HandleFunc("GET /api/v1/backups", s.requireAuth(s.handleBackupList))
+	s.mux.HandleFunc("POST /api/v1/backups", s.requireAuth(s.handleBackupCreate))
+	s.mux.HandleFunc("GET /api/v1/backups/{name}/download", s.requireAuth(s.handleBackupDownload))
+	s.mux.HandleFunc("DELETE /api/v1/backups/{name}", s.requireAuth(s.handleBackupDelete))
+	s.mux.HandleFunc("POST /api/v1/backups/{name}/restore", s.requireAuth(s.handleBackupRestore))
+
+	// 设置与更新
+	s.mux.HandleFunc("GET /api/v1/settings", s.requireAuth(s.handleSettingsGet))
+	s.mux.HandleFunc("PUT /api/v1/settings", s.requireAuth(s.handleSettingsPut))
+	s.mux.HandleFunc("POST /api/v1/updates/check", s.requireAuth(s.handleUpdateCheck))
+	s.mux.HandleFunc("POST /api/v1/updates/apply", s.requireAuth(s.handleUpdateApply))
 
 	// 兜底：静态资源与 SPA 入口
 	s.mux.HandleFunc("GET /", s.handleStatic)

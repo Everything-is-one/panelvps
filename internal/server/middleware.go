@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -46,7 +47,7 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 		h.Set("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
 		h.Set("Content-Security-Policy",
 			"default-src 'self'; base-uri 'none'; form-action 'self'; "+
-				"frame-ancestors 'none'; object-src 'none'")
+				"frame-ancestors 'none'; object-src 'none'; connect-src 'self'")
 		// HSTS 只在确实走 TLS 时下发，避免本地 http 调试被浏览器锁死
 		if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
 			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
@@ -57,10 +58,13 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 
 // withBodyLimit 限制请求体大小，防止内存被撑爆（PRD S-E08）。
 func (s *Server) withBodyLimit(next http.Handler) http.Handler {
-	const maxBody = 1 << 20 // 1MB，M0 没有上传接口
+	const maxBody = 1 << 20 // 普通接口 1MB
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil && r.Method != http.MethodGet && r.Method != http.MethodHead {
-			r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+			// 上传接口自己设置上限（512MB），这里跳过
+			if r.URL.Path != "/api/v1/files/upload" {
+				r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+			}
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -134,6 +138,26 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 	n, err := r.ResponseWriter.Write(b)
 	r.bytes += n
 	return n, err
+}
+
+// Hijack 让 WebSocket 升级能在访问日志中间件之后正常工作。
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	conn, rw, err := h.Hijack()
+	if err == nil {
+		r.status = http.StatusSwitchingProtocols
+	}
+	return conn, rw, err
+}
+
+// Flush 透传，避免 SSE/流式响应被缓冲。
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // requireAuth 包装受保护的处理器：未登录直接 401。

@@ -1,0 +1,18 @@
+slug: sqlite3
+name: SQLite3
+category: tool
+summary: 单文件数据库命令行工具
+version: "3.40"
+memory_mb: 2
+disk_mb: 8
+ports: []
+deps: []
+conflicts: []
+risk: low
+warning: ""
+plan:
+  install:
+    - apt: { names: [sqlite3], update: true }
+    - check: { cmd: ["sqlite3", "--version"] }
+  uninstall:
+    - apt: { names: [sqlite3], purge: true }

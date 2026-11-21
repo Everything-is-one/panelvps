@@ -1,0 +1,18 @@
+slug: curl
+name: curl
+category: tool
+summary: 命令行 HTTP 客户端，排查网络问题必备
+version: "7.88"
+memory_mb: 3
+disk_mb: 10
+ports: []
+deps: []
+conflicts: []
+risk: low
+warning: ""
+plan:
+  install:
+    - apt: { names: [curl], update: true }
+    - check: { cmd: ["curl", "--version"] }
+  uninstall:
+    - apt: { names: [curl], purge: true }

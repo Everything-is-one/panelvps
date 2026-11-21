@@ -1,0 +1,18 @@
+slug: git
+name: Git
+category: tool
+summary: 版本控制工具
+version: "2.39"
+memory_mb: 5
+disk_mb: 40
+ports: []
+deps: []
+conflicts: []
+risk: low
+warning: ""
+plan:
+  install:
+    - apt: { names: [git], update: true }
+    - check: { cmd: ["git", "--version"] }
+  uninstall:
+    - apt: { names: [git], purge: true }

@@ -173,3 +173,77 @@ pre.log {
   padding: 10px; font-size: 12px; max-height: 240px; overflow: auto; white-space: pre-wrap;
 }
 
+/* ---------- 运维页面 ---------- */
+
+#app { max-width: 1080px; }
+
+.tabs { flex-wrap: wrap; row-gap: 2px; }
+.head { flex-wrap: wrap; gap: 10px; }
+
+.row > button { width: auto; margin: 0; padding: 6px 12px; }
+.row > .row > button { width: auto; margin: 0; }
+/* 一行内的表单控件按内容宽度伸缩；否则全局的 width:100% 会把一行挤成多行 */
+.row > input:not([type="checkbox"]):not([type="file"]),
+.row > select { width: auto; flex: 1 1 140px; min-width: 110px; margin: 0; }
+.row > .field { flex: 1 1 160px; margin-bottom: 0; }
+.row > .field > input, .row > .field > select { width: 100%; }
+.row.spread { justify-content: space-between; align-items: flex-start; }
+input[type="checkbox"] { width: auto; margin: 0; }
+label.row { display: flex; align-items: center; gap: 8px; margin: 8px 0; color: var(--text); }
+
+.empty {
+  padding: 24px; text-align: center; color: var(--muted);
+  border: 1px dashed var(--border); border-radius: 10px; font-size: 13px;
+}
+
+.badge.muted, .badge.plain { background: #f1f1ee; color: var(--muted); }
+
+.path-bar {
+  flex: 1; min-width: 240px; background: #f5f5f2; border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; overflow-x: auto; white-space: nowrap;
+}
+
+.file-name { cursor: pointer; color: var(--accent); }
+.file-name.dir { font-weight: 500; }
+.file-name:hover { text-decoration: underline; }
+
+table.data td { vertical-align: middle; }
+table.data td.check { width: 28px; }
+table.data td.mono { white-space: nowrap; }
+
+.editor {
+  width: 100%; min-height: 300px; font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px; line-height: 1.5; padding: 10px; border: 1px solid var(--border);
+  border-radius: 8px; resize: vertical; background: #fbfbfa; color: var(--text);
+}
+.editor:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+
+.term {
+  background: #16181d; color: #d8dee9; border-radius: 10px; padding: 14px;
+  height: 460px; overflow: auto; font-family: ui-monospace, Consolas, monospace;
+  font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-all;
+  margin: 12px 0 8px; outline: none;
+}
+.term:focus { box-shadow: 0 0 0 2px var(--accent-soft); }
+
+pre.log.tall { max-height: 460px; min-height: 160px; }
+
+.warn-box {
+  background: #fdf1de; border: 1px solid #f0c98a; color: #6d4708;
+  border-radius: 8px; padding: 8px 10px; font-size: 12px; margin: 6px 0 10px;
+}
+
+.grid.g2 { grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+
+.site-card h3, .store-card h3 { margin: 0; font-size: 15px; font-weight: 500; }
+.site-card .hint, .store-card .hint { margin-top: 2px; }
+.site-card, .store-card { padding: 16px; }
+
+.stat .v { word-break: break-word; }
+
+@media (max-width: 720px) {
+  #app { padding: 20px 12px 48px; }
+  .grid.g2 { grid-template-columns: 1fr; }
+}
+
+

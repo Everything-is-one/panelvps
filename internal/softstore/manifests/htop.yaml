@@ -1,0 +1,18 @@
+slug: htop
+name: htop
+category: tool
+summary: 交互式进程查看器，比 top 好用
+version: "3.2"
+memory_mb: 4
+disk_mb: 10
+ports: []
+deps: []
+conflicts: []
+risk: low
+warning: ""
+plan:
+  install:
+    - apt: { names: [htop], update: true }
+    - check: { cmd: ["htop", "--version"] }
+  uninstall:
+    - apt: { names: [htop], purge: true }

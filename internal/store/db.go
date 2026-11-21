@@ -159,7 +159,11 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, proxySchema); err != nil {
 		return fmt.Errorf("初始化代理表结构失败: %w", err)
 	}
-	for _, v := range []int{1, 2} {
+	// v3：运维模块（网站 / 防火墙规则 / 已装软件）
+	if _, err := s.db.ExecContext(ctx, opsSchema); err != nil {
+		return fmt.Errorf("初始化运维表结构失败: %w", err)
+	}
+	for _, v := range []int{1, 2, 3} {
 		if _, err := s.db.ExecContext(ctx,
 			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(?, ?)`,
 			v, time.Now().Unix()); err != nil {

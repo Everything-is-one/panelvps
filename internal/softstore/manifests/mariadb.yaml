@@ -1,0 +1,20 @@
+slug: mariadb
+name: MariaDB
+category: database
+summary: MySQL 兼容的关系型数据库
+version: "10.11"
+memory_mb: 150
+disk_mb: 400
+ports: [3306]
+deps: []
+conflicts: [mysql-server]
+risk: medium
+warning: 1GB 内存的机器上会吃掉约 150MB，装前请确认代理与 Nginx 的余量；面板不会自动创建业务库。
+plan:
+  install:
+    - apt: { names: [mariadb-server], update: true }
+    - service: { name: mariadb, enable: true, start: true }
+    - check: { cmd: ["mariadb", "--version"] }
+  uninstall:
+    - service: { name: mariadb, stop: true, disable: true }
+    - apt: { names: [mariadb-server], purge: true }
