@@ -224,7 +224,9 @@ fi
 info "安装二进制"
 install -m 0755 "$SRC" "$BIN"
 
+NEW_INSTALL=0
 if [[ ! -f "$CONF" ]]; then
+    NEW_INSTALL=1
     info "生成默认配置（面板将只监听 127.0.0.1）"
     "$BIN" info -config "$CONF" >/dev/null 2>&1 || true
 fi
@@ -279,11 +281,28 @@ fi
 
 PORT=$(grep -E '^listen:' "$CONF" | awk '{print $2}' | awk -F: '{print $2}' || true)
 PORT=${PORT:-20873}
+
+# 新装时把初始密码从 journald 里取出来直接显示，省掉手工 grep。
+# 密码字符集含 "="，slog 遇到会加引号，所以按行尾截取再去引号，不能按空格切。
+INIT_PWD=""
+if [[ "$NEW_INSTALL" == "1" ]] && command -v journalctl >/dev/null 2>&1; then
+    INIT_PWD=$(journalctl -u panelvps --no-pager -n 200 2>/dev/null \
+        | grep ' password=' | tail -1 | sed 's/.* password=//' || true)
+    INIT_PWD=${INIT_PWD#\"}
+    INIT_PWD=${INIT_PWD%\"}
+fi
+
 echo
 echo "================================================"
 echo " PanelVPS 已启动"
 echo " 监听: $(grep -E '^listen:' "$CONF" | awk '{print $2}' || echo '127.0.0.1:20873')"
-echo " 密码: journalctl -u panelvps | grep 初始管理员"
+if [[ -n "$INIT_PWD" ]]; then
+    echo " 用户名: admin"
+    echo " 密  码: $INIT_PWD"
+else
+    echo " 密码: journalctl -u panelvps --no-pager | grep password="
+    echo "       （已装过则沿用原密码；忘了可 panelvps reset-password）"
+fi
 echo
 echo " 默认只监听本机，推荐用 SSH 隧道访问："
 echo "   ssh -L ${PORT}:127.0.0.1:${PORT} root@<服务器IP>"
