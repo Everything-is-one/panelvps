@@ -2,6 +2,7 @@
 
 > 1GB 内存 VPS 上的轻量运维面板，内置 Xray 代理管理。
 
+[![CI](https://github.com/Everything-is-one/panelvps/actions/workflows/ci.yml/badge.svg)](https://github.com/Everything-is-one/panelvps/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.27%2B-00ADD8.svg)](https://go.dev/)
 [![Platform](https://img.shields.io/badge/linux-amd64%20%7C%20arm64-lightgrey.svg)](#一键安装)
