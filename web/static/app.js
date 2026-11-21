@@ -149,7 +149,7 @@ function renderLogin(message) {
     }
   });
 
-  app().className = "";
+  app().className = "login-wrap";
   app().replaceChildren(el("div", { class: "card login-card" }, [
     el("h1", { text: "PanelVPS" }),
     el("p", { class: "sub", text: "轻量运维面板 · 请登录" }),
@@ -195,7 +195,7 @@ function renderChangePassword(forced) {
     }
   });
 
-  app().className = "";
+  app().className = "login-wrap";
   app().replaceChildren(el("div", { class: "card login-card" }, [
     el("h1", { text: forced ? "设置新密码" : "修改密码" }),
     form,
@@ -205,47 +205,114 @@ function renderChangePassword(forced) {
 
 // ---------- 外壳 ----------
 
+// 导航图标：单路径线性图标，统一 24 视窗、1.7 描边，避免各页面风格打架。
+const NAV_ICONS = {
+  overview: "M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z",
+  proxy: "M4 8h12l-3-3m3 3-3 3M20 16H8l3-3m-3 3 3 3",
+  sites: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18m0 0c2.4 2.5 3.6 5.5 3.6 9s-1.2 6.5-3.6 9m0-18c-2.4 2.5-3.6 5.5-3.6 9s1.2 6.5 3.6 9M3.4 9h17.2M3.4 15h17.2",
+  files: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
+  terminal: "M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1m4 5 3 2.5L8 15m5 0h4",
+  firewall: "M12 3l8 3v6c0 5-3.4 8.2-8 9-4.6-.8-8-4-8-9V6z",
+  logs: "M5 6h14M5 12h14M5 18h9",
+  store: "M6 8h12l1 12H5zM9 8a3 3 0 0 1 6 0",
+  backup: "M4 7c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3m0 0v10c0 1.7 3.6 3 8 3s8-1.3 8-3V7M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
+  settings: "M4 7h6M14 7h6M4 17h10M18 17h2M12 4v6M8 14v6",
+};
+
+const NAV_ITEMS = [
+  ["overview", "概览"], ["proxy", "代理"], ["sites", "网站"], ["files", "文件"],
+  ["terminal", "终端"], ["firewall", "防火墙"], ["logs", "日志"], ["store", "商店"],
+  ["backup", "备份"], ["settings", "设置"],
+];
+
+const VIEW_META = {
+  overview: ["概览", "资源占用、系统环境与常用入口"],
+  proxy: ["代理", "Xray 入站、用户与订阅"],
+  sites: ["网站", "Nginx 站点与证书"],
+  files: ["文件", "浏览、编辑服务器文件"],
+  terminal: ["终端", "以 root 身份执行命令"],
+  firewall: ["防火墙", "规则、封禁与 SSH 保护"],
+  logs: ["日志", "面板运行日志与系统日志"],
+  store: ["商店", "一键安装常用服务"],
+  backup: ["备份", "数据库、配置与站点打包"],
+  settings: ["设置", "访问方式、账号与运行参数"],
+};
+
+function icon(name, size) {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", size || 18);
+  svg.setAttribute("height", size || 18);
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.7");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(ns, "path");
+  p.setAttribute("d", NAV_ICONS[name] || NAV_ICONS.overview);
+  svg.appendChild(p);
+  return svg;
+}
+
 function renderApp(view) {
   state.view = view || state.view || "overview";
   if (state.timer) { clearInterval(state.timer); state.timer = null; }
+  // 上一个视图注册的清理钩子（终端要断开 socket、释放 xterm 实例）
+  if (typeof state.cleanup === "function") {
+    try { state.cleanup(); } catch (_) { /* 清理失败不影响切换 */ }
+    state.cleanup = null;
+  }
 
-  const navBtn = (key, label) => el("button", {
-    class: "tab" + (state.view === key ? " active" : ""),
-    text: label,
+  const logout = async () => {
+    try { await api("POST", "/api/v1/auth/logout", {}); } catch (_) { /* 忽略 */ }
+    state.user = null;
+    renderLogin("");
+  };
+
+  const navItems = NAV_ITEMS.map(([key, label]) => el("button", {
+    class: "nav-item" + (state.view === key ? " active" : ""),
     onclick: () => renderApp(key),
-  });
+    title: label,
+  }, [icon(key), el("span", { text: label })]));
 
-  const logout = el("button", {
-    class: "ghost", text: "退出",
-    onclick: async () => {
-      try { await api("POST", "/api/v1/auth/logout", {}); } catch (_) { /* 忽略 */ }
-      state.user = null;
-      renderLogin("");
-    },
-  });
-  const changePwd = el("button", {
-    class: "ghost", text: "改密码",
-    onclick: () => renderChangePassword(false),
-  });
-
-  const head = el("div", { class: "head" }, [
-    el("div", {}, [
-      el("h1", { text: "PanelVPS" }),
-      el("div", { class: "who", text: "登录账号：" + (state.user ? state.user.username : "-") }),
+  const username = state.user ? state.user.username : "admin";
+  const sidebar = el("aside", { class: "sidebar" }, [
+    el("div", { class: "brand" }, [
+      el("span", { class: "brand-mark", text: "PV" }),
+      el("div", { class: "brand-text" }, [
+        el("strong", { text: "PanelVPS" }),
+        el("span", { text: "服务器面板" }),
+      ]),
     ]),
-    el("div", { class: "row" }, [changePwd, logout]),
+    el("nav", { class: "nav" }, navItems),
+    el("div", { class: "sidebar-foot" }, [
+      el("div", { class: "user-chip" }, [
+        el("span", { class: "avatar", text: username.slice(0, 1).toUpperCase() }),
+        el("div", { class: "user-meta" }, [
+          el("strong", { text: username }),
+          el("span", { text: "已登录" }),
+        ]),
+      ]),
+      el("button", { class: "ghost block", text: "退出登录", onclick: logout }),
+    ]),
   ]);
 
-  const nav = el("div", { class: "tabs" }, [
-    navBtn("overview", "概览"), navBtn("proxy", "代理"),
-    navBtn("sites", "网站"), navBtn("files", "文件"), navBtn("terminal", "终端"),
-    navBtn("firewall", "防火墙"), navBtn("logs", "日志"), navBtn("store", "商店"),
-    navBtn("backup", "备份"), navBtn("settings", "设置"),
+  const meta = VIEW_META[state.view] || VIEW_META.overview;
+  const topbar = el("header", { class: "topbar" }, [
+    el("div", {}, [
+      el("h1", { text: meta[0] }),
+      el("p", { class: "sub", text: meta[1] }),
+    ]),
+    el("div", { class: "row" }, [
+      el("button", { class: "ghost", text: "改密码", onclick: () => renderChangePassword(false) }),
+    ]),
   ]);
-  const content = el("div", { id: "view" });
 
-  app().className = "";
-  app().replaceChildren(head, nav, content);
+  const content = el("div", { id: "view", class: "view" });
+  app().className = "shell";
+  app().replaceChildren(sidebar, el("main", { class: "main" }, [topbar, content]));
 
   switch (state.view) {
     case "proxy": renderProxyView(content); break;
@@ -839,13 +906,105 @@ function renderFilesView(root) {
     } catch (e) { alert(e.message); }
   };
 
-  const removePaths = async (paths) => {
-    if (!paths.length) return;
-    if (!confirm("将递归删除以下 " + paths.length + " 项，且不可恢复：\n\n" + paths.join("\n"))) return;
-    try {
-      await api("POST", "/api/v1/files/delete", { paths: paths, confirm: "DELETE" });
-      refresh();
-    } catch (e) { alert(e.message); }
+  const removePaths = (paths) => {
+    if (!paths.length) return alert("请先勾选文件");
+    const permanent = el("input", { type: "checkbox" });
+    const go = el("button", { text: "移入回收站" });
+    const tip = el("div", { class: "hint", text: "默认移入回收站，保留 7 天，期间可以在「回收站」里原样恢复。" });
+    const m = modal("删除 " + paths.length + " 项", [
+      el("div", { class: "warn-box", text: "删除的是服务器上的真实文件。系统关键目录、挂载点、面板自身的数据与配置目录会被服务端直接拒绝，勾选也没用。" }),
+      el("pre", { class: "log", text: paths.join("\n") }),
+      el("label", { class: "row", style: "margin-top:10px" }, [permanent, el("span", { text: "彻底删除（不放进回收站，不可恢复）" })]),
+      tip,
+      el("div", { class: "row wrap", style: "margin-top:14px" }, [
+        go, el("button", { class: "ghost", text: "取消", onclick: () => m.close() }),
+      ]),
+    ]);
+    permanent.addEventListener("change", () => {
+      go.className = permanent.checked ? "danger" : "";
+      go.textContent = permanent.checked ? "彻底删除" : "移入回收站";
+      tip.textContent = permanent.checked
+        ? "彻底删除不经过回收站，删除后无法恢复，点下去还会再要求输入一次 DELETE。"
+        : "默认移入回收站，保留 7 天，期间可以在「回收站」里原样恢复。";
+    });
+    go.addEventListener("click", async () => {
+      if (permanent.checked) {
+        const w = prompt("彻底删除后无法恢复。输入 DELETE 继续：");
+        if (w !== "DELETE") return;
+      }
+      go.disabled = true;
+      try {
+        const res = await api("POST", "/api/v1/files/delete", {
+          paths: paths, confirm: "DELETE", permanent: permanent.checked,
+        });
+        m.close();
+        msg.className = "msg ok";
+        msg.textContent = res.trashed
+          ? "已移入回收站 " + res.trashed + " 项"
+          : "已彻底删除 " + res.deleted + " 项";
+        refresh();
+      } catch (e) {
+        alert(e.message);
+      } finally {
+        go.disabled = false;
+      }
+    });
+  };
+
+  const openTrash = async () => {
+    const body = el("div");
+    modal("回收站", [body]);
+
+    const act = async (fn) => {
+      try { await fn(); await loadTrash(); await refresh(); }
+      catch (e) { alert(e.message); }
+    };
+
+    const paint = (d) => {
+      if (!d.items.length) {
+        body.replaceChildren(
+          el("div", { class: "empty", text: "回收站是空的" }),
+          el("div", { class: "hint", style: "margin-top:8px", text: "目录：" + d.dir }),
+        );
+        return;
+      }
+      const rows = d.items.map((it) => {
+        const restore = el("button", { class: "link", text: "恢复", onclick: () => act(() =>
+          api("POST", "/api/v1/trash/restore", { ids: [it.id] })) });
+        const kill = el("button", { class: "link danger", text: "彻底删除", onclick: () => {
+          const w = prompt("彻底删除「" + it.name + "」后不可恢复，输入 DELETE 继续：");
+          if (w !== "DELETE") return;
+          act(() => api("POST", "/api/v1/trash/delete", { ids: [it.id], confirm: "DELETE" }));
+        } });
+        return el("tr", {}, [
+          el("td", { text: it.name + (it.is_dir ? "/" : "") }),
+          el("td", { class: "mono", text: "/" + it.original }),
+          el("td", { class: "mono", text: it.is_dir ? "—" : fmtBytes(it.size) }),
+          el("td", { class: "mono", text: fmtTime(it.deleted_at) }),
+          el("td", {}, [el("div", { class: "row" }, [restore, kill])]),
+        ]);
+      });
+      body.replaceChildren(
+        el("div", { class: "row spread" }, [
+          el("span", { class: "hint", text: d.count + " 项 · " + fmtBytes(d.bytes) + " · 自动保留 7 天" }),
+          el("button", { class: "ghost danger", text: "清空回收站", onclick: () => {
+            const w = prompt("清空回收站后不可恢复，输入 DELETE 继续：");
+            if (w !== "DELETE") return;
+            act(() => api("POST", "/api/v1/trash/delete", { all: true, confirm: "DELETE" }));
+          } }),
+        ]),
+        el("div", { class: "table-wrap", style: "margin-top:10px" },
+          [simpleTable(["名称", "原路径", "大小", "删除时间", "操作"], rows)]),
+        el("div", { class: "hint", style: "margin-top:10px", text: "目录：" + d.dir }),
+      );
+    };
+
+    const loadTrash = async () => {
+      body.replaceChildren(el("div", { class: "hint", text: "读取中…" }));
+      try { paint(await api("GET", "/api/v1/trash")); }
+      catch (e) { body.replaceChildren(el("div", { class: "msg err", text: e.message })); }
+    };
+    loadTrash();
   };
 
   const renderList = (data) => {
@@ -907,7 +1066,8 @@ function renderFilesView(root) {
       try { await api("POST", "/api/v1/files/archive", { paths: paths, dest: dest }); refresh(); }
       catch (e) { alert(e.message); }
     } }),
-    el("button", { class: "link danger", text: "删除选中", onclick: () => removePaths(Array.from(selected)) }),
+    el("button", { class: "ghost", text: "回收站", onclick: openTrash }),
+    el("button", { class: "ghost danger", text: "删除选中", onclick: () => removePaths(Array.from(selected)) }),
   ]);
 
   fileInput.addEventListener("change", async () => {
@@ -961,6 +1121,151 @@ function stripAnsi(s) {
 }
 
 function renderTerminalView(root) {
+  if (typeof window.Terminal !== "function" || !(window.FitAddon && window.FitAddon.FitAddon)) {
+    renderTerminalFallback(root);
+    return;
+  }
+
+  const host = el("div", { class: "term-host" });
+  const msg = el("div", { class: "msg" });
+  const status = el("span", { class: "badge plain", text: "未连接" });
+  const dimLbl = el("span", { class: "hint mono", text: "—" });
+  const connectBtn = el("button", { text: "连接" });
+  const clearBtn = el("button", { class: "ghost", text: "清屏" });
+  let ws = null;
+
+  const setStatus = (text, cls) => { status.className = "badge " + (cls || "plain"); status.textContent = text; };
+  const send = (s) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data: s })); };
+  const sendResize = (c, r) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "resize", cols: c, rows: r })); };
+
+  // xterm 负责 ANSI 解析、光标定位、退格/全角宽度与 UTF-8 流式解码，
+  // 不再由前端拼字符串——之前的「光标不跟随、ping 后面出乱码」都是那套做法带来的。
+  const term = new Terminal({
+    cursorBlink: true,
+    cursorStyle: "block",
+    fontSize: 13,
+    fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace',
+    lineHeight: 1.3,
+    scrollback: 5000,
+    convertEol: false,
+    theme: {
+      background: "#0d1117", foreground: "#d1d7e0", cursor: "#7aa2f7", cursorAccent: "#0d1117",
+      selectionBackground: "rgba(122,162,247,.30)",
+      black: "#1b1f27", red: "#f7768e", green: "#9ece6a", yellow: "#e0af68",
+      blue: "#7aa2f7", magenta: "#bb9af7", cyan: "#7dcfff", white: "#c0caf5",
+      brightBlack: "#5a6478", brightRed: "#ff9aae", brightGreen: "#b9f27c", brightYellow: "#ffd68a",
+      brightBlue: "#9ab8ff", brightMagenta: "#d4b0ff", brightCyan: "#a4e4ff", brightWhite: "#ffffff",
+    },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+
+  const doFit = () => {
+    try { fit.fit(); } catch (_) { /* 容器还没布局好，下次再算 */ }
+    dimLbl.textContent = term.cols + " × " + term.rows;
+  };
+
+  const connect = async () => {
+    if (ws) { try { ws.close(); } catch (_) {} ws = null; }
+    msg.className = "msg";
+    msg.textContent = "正在申请终端票据…";
+    setStatus("连接中", "warn");
+    try {
+      const t = await api("POST", "/api/v1/terminal/ticket", {});
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      const url = proto + "://" + location.host + "/api/v1/terminal/ws?ticket=" +
+        encodeURIComponent(t.ticket) + "&cols=" + term.cols + "&rows=" + term.rows;
+      ws = new WebSocket(url);
+      ws.binaryType = "arraybuffer";
+      ws.onopen = () => {
+        msg.className = "msg ok";
+        msg.textContent = "已连接";
+        setStatus("已连接", "ok");
+        term.focus();
+        doFit();
+        sendResize(term.cols, term.rows);
+      };
+      ws.onmessage = (ev) => {
+        if (typeof ev.data === "string") {
+          try {
+            const m = JSON.parse(ev.data);
+            if (m.type === "exit") {
+              term.write("\r\n\x1b[2m[会话结束]\x1b[0m\r\n");
+              msg.textContent = "会话已结束";
+              setStatus("已结束", "plain");
+            } else if (m.type === "error") {
+              msg.className = "msg err";
+              msg.textContent = m.data;
+              setStatus("错误", "err");
+            }
+          } catch (_) {
+            term.write(ev.data);
+          }
+          return;
+        }
+        // 二进制帧原样交给 xterm：ANSI 序列与多字节字符由它自己处理
+        term.write(new Uint8Array(ev.data));
+      };
+      ws.onclose = () => {
+        setStatus("已断开", "plain");
+        if (msg.textContent === "已连接") { msg.className = "msg"; msg.textContent = "连接已断开"; }
+      };
+      ws.onerror = () => {
+        msg.className = "msg err";
+        msg.textContent = "WebSocket 连接失败";
+        setStatus("失败", "err");
+      };
+    } catch (e) {
+      msg.className = "msg err";
+      msg.textContent = e.message;
+      setStatus("未连接", "plain");
+    }
+  };
+
+  connectBtn.addEventListener("click", connect);
+  clearBtn.addEventListener("click", () => term.clear());
+
+  root.replaceChildren(card("Web 终端", [
+    el("div", { class: "term-bar" }, [
+      connectBtn,
+      clearBtn,
+      status,
+      dimLbl,
+      el("span", { class: "hint", text: "点击终端即可输入；Ctrl+C 中断，Ctrl+Shift+V 粘贴，选中即复制（HTTPS 下生效）" }),
+    ]),
+    msg,
+    host,
+    el("div", { class: "row wrap", style: "margin-top:10px" }, [
+      el("span", { class: "hint", text: "终端默认关闭，到「设置 → 基本设置」勾选「启用 Web 终端」即可生效，不用重启。会话最长 30 分钟，同时最多 2 个。" }),
+      el("button", { class: "ghost", text: "去设置", onclick: () => renderApp("settings") }),
+    ]),
+  ]));
+
+  term.open(host);
+  requestAnimationFrame(doFit);
+  term.onData(send);
+  term.onResize(({ cols, rows }) => { dimLbl.textContent = cols + " × " + rows; sendResize(cols, rows); });
+  // 选中即复制：剪贴板 API 只在 HTTPS / localhost 下可用，失败就算了，不打断使用
+  term.onSelectionChange(() => {
+    const sel = term.getSelection();
+    if (sel && navigator.clipboard) navigator.clipboard.writeText(sel).catch(() => {});
+  });
+  term.focus();
+
+  const ro = new ResizeObserver(() => { try { fit.fit(); } catch (_) {} });
+  ro.observe(host);
+
+  state.cleanup = () => {
+    try { if (ws) ws.close(); } catch (_) {}
+    ro.disconnect();
+    try { term.dispose(); } catch (_) {}
+  };
+
+  setTimeout(connect, 120);
+}
+
+// 兜底渲染：vendor 里的 xterm 没加载成功时仍能连着看输出（功能有限）。
+function renderTerminalFallback(root) {
   const out = el("pre", { class: "term", tabindex: "0" });
   const msg = el("div", { class: "msg" });
   const cols = el("span", { class: "mono", text: "—" });
@@ -981,39 +1286,27 @@ function renderTerminalView(root) {
     out.textContent = buffer;
     out.scrollTop = out.scrollHeight;
   };
-
-  const send = (s) => {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data: s }));
-  };
+  const send = (s) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data: s })); };
 
   const connect = async () => {
-    if (ws) { try { ws.close(); } catch (_) {} ws = null; }
-    msg.className = "msg";
-    msg.textContent = "正在申请终端票据…";
     try {
       const t = await api("POST", "/api/v1/terminal/ticket", {});
       const dim = size();
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      const url = proto + "://" + location.host + "/api/v1/terminal/ws?ticket=" +
-        encodeURIComponent(t.ticket) + "&cols=" + dim.c + "&rows=" + dim.r;
-      ws = new WebSocket(url);
+      ws = new WebSocket(proto + "://" + location.host + "/api/v1/terminal/ws?ticket=" +
+        encodeURIComponent(t.ticket) + "&cols=" + dim.c + "&rows=" + dim.r);
       ws.binaryType = "arraybuffer";
-      ws.onopen = () => {
-        msg.className = "msg ok";
-        msg.textContent = "已连接";
-        out.focus();
-      };
+      ws.onopen = () => { msg.className = "msg ok"; msg.textContent = "已连接（简化渲染）"; out.focus(); };
       ws.onmessage = (ev) => {
         if (typeof ev.data === "string") {
           try {
             const m = JSON.parse(ev.data);
-            if (m.type === "exit") { append("\n[会话结束]\n"); msg.textContent = "会话已结束"; }
+            if (m.type === "exit") append("\n[会话结束]\n");
             if (m.type === "error") { msg.className = "msg err"; msg.textContent = m.data; }
           } catch (_) { append(ev.data); }
           return;
         }
-        const text = new TextDecoder("utf-8").decode(new Uint8Array(ev.data));
-        append(stripAnsi(text));
+        append(stripAnsi(new TextDecoder("utf-8").decode(new Uint8Array(ev.data))));
       };
       ws.onclose = () => { msg.className = "msg"; msg.textContent = "连接已断开"; };
       ws.onerror = () => { msg.className = "msg err"; msg.textContent = "WebSocket 连接失败"; };
@@ -1028,44 +1321,25 @@ function renderTerminalView(root) {
     ArrowUp: "\x1b[A", ArrowDown: "\x1b[B", ArrowRight: "\x1b[C", ArrowLeft: "\x1b[D",
     Home: "\x1b[H", End: "\x1b[F", Delete: "\x1b[3~", PageUp: "\x1b[5~", PageDown: "\x1b[6~",
   };
-
   out.addEventListener("keydown", (e) => {
     if (e.ctrlKey && e.key.length === 1) {
       const code = e.key.toUpperCase().charCodeAt(0) - 64;
-      if (code >= 0 && code < 32) {
-        e.preventDefault();
-        send(String.fromCharCode(code));
-        return;
-      }
+      if (code >= 0 && code < 32) { e.preventDefault(); send(String.fromCharCode(code)); return; }
     }
     if (keyMap[e.key]) { e.preventDefault(); send(keyMap[e.key]); return; }
     if (e.key.length === 1) { e.preventDefault(); send(e.key); }
   });
-
-  out.addEventListener("paste", (e) => {
-    e.preventDefault();
-    send(e.clipboardData.getData("text"));
-  });
-
-  window.addEventListener("resize", () => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const dim = size();
-    ws.send(JSON.stringify({ type: "resize", cols: dim.c, rows: dim.r }));
-  });
+  out.addEventListener("paste", (e) => { e.preventDefault(); send(e.clipboardData.getData("text")); });
 
   root.replaceChildren(card("Web 终端", [
-    el("div", { class: "row wrap" }, [
+    el("div", { class: "term-bar" }, [
       el("button", { text: "连接", onclick: connect }),
       el("button", { class: "ghost", text: "清屏", onclick: () => { buffer = ""; out.textContent = ""; } }),
       el("span", { class: "hint", text: "尺寸 " }, [cols]),
-      el("span", { class: "hint", text: "点击黑框后即可输入；Ctrl+C 中断当前命令" }),
+      el("span", { class: "hint", text: "简化渲染：未加载到终端组件，光标与全角字符可能不准" }),
     ]),
     msg,
     out,
-    el("div", { class: "row wrap" }, [
-      el("span", { class: "hint", text: "终端默认关闭，到「设置 → 基本设置」勾选「启用 Web 终端」即可生效，不用重启。会话最长 30 分钟，同时最多 2 个。" }),
-      el("button", { class: "ghost", text: "去设置", onclick: () => renderApp("settings") }),
-    ]),
   ]));
   setTimeout(connect, 100);
 }
@@ -1892,7 +2166,7 @@ async function boot() {
     }
     renderApp("overview");
   } catch (err) {
-    app().className = "";
+    app().className = "login-wrap";
     app().replaceChildren(el("div", { class: "card login-card" }, [
       el("h1", { text: "无法连接面板" }),
       el("p", { class: "sub", text: err.message }),

@@ -63,6 +63,8 @@ type Server struct {
 	xr       *xray.Manager
 
 	files    *filemgr.Manager
+	trash    *filemgr.Trash
+	guard    *filemgr.Guard
 	sites    *sites.Manager
 	appstore *softstore.Store
 	backups  *backup.Manager
@@ -118,6 +120,22 @@ func New(cfg *config.Config, st *store.Store, logger *slog.Logger) (*Server, err
 		logger.Warn("文件管理不可用", "root", cfg.FileRoot, "err", err)
 	} else {
 		s.files = fm
+		// 面板跑在 root 下且带 CAP_DAC_OVERRIDE，「用户自己小心点」不成立：
+		// 删除守卫与回收站都放在服务端，前端被绕过也删不掉系统目录。
+		s.guard = filemgr.NewGuard(
+			cfg.DataDir,
+			filepath.Dir(cfg.Path()),
+			filepath.Join(cfg.DataDir, "trash"),
+			filepath.Join(cfg.DataDir, "backups"),
+		)
+		if tr, err := filemgr.NewTrash(filepath.Join(cfg.DataDir, "trash")); err != nil {
+			logger.Warn("回收站不可用，删除将退化为彻底删除", "err", err)
+		} else {
+			s.trash = tr
+			if n := tr.Sweep(7 * 24 * time.Hour); n > 0 {
+				logger.Info("回收站已清理过期条目", "count", n)
+			}
+		}
 	}
 	s.sites = &sites.Manager{
 		ConfDir:     cfg.NginxConfDir,
@@ -212,6 +230,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/files/rename", s.requireAuth(s.handleFileRename))
 	s.mux.HandleFunc("POST /api/v1/files/copy", s.requireAuth(s.handleFileCopy))
 	s.mux.HandleFunc("POST /api/v1/files/delete", s.requireAuth(s.handleFileDelete))
+	s.mux.HandleFunc("GET /api/v1/trash", s.requireAuth(s.handleTrashList))
+	s.mux.HandleFunc("POST /api/v1/trash/restore", s.requireAuth(s.handleTrashRestore))
+	s.mux.HandleFunc("POST /api/v1/trash/delete", s.requireAuth(s.handleTrashDelete))
 	s.mux.HandleFunc("POST /api/v1/files/archive", s.requireAuth(s.handleFileArchive))
 	s.mux.HandleFunc("POST /api/v1/files/extract", s.requireAuth(s.handleFileExtract))
 

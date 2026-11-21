@@ -308,8 +308,9 @@ func (s *Server) handleFileCopy(w http.ResponseWriter, r *http.Request) {
 }
 
 type fileDeleteReq struct {
-	Paths   []string `json:"paths"`
-	Confirm string   `json:"confirm"`
+	Paths     []string `json:"paths"`
+	Confirm   string   `json:"confirm"`
+	Permanent bool     `json:"permanent"`
 }
 
 func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
@@ -325,19 +326,48 @@ func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, codeBadRequest, "删除需要二次确认（confirm=DELETE）")
 		return
 	}
+	if !req.Permanent && s.trash == nil {
+		fail(w, http.StatusServiceUnavailable, codeInternalError,
+			"回收站不可用（数据目录写不进去）。确认要永久删除时，请勾选「彻底删除」再试")
+		return
+	}
+
 	var errs []string
+	trashed, deleted := 0, 0
 	for _, p := range req.Paths {
-		if err := s.files.Remove(p); err != nil {
+		abs, err := s.files.Resolve(p)
+		if err != nil {
 			errs = append(errs, p+": "+err.Error())
 			continue
 		}
-		s.audit(r, "file_delete", p, "递归删除")
+		// 系统目录、挂载点、面板自身数据目录一律拦在服务端
+		if s.guard != nil {
+			if err := s.guard.Check(abs); err != nil {
+				errs = append(errs, p+": "+err.Error())
+				continue
+			}
+		}
+		if req.Permanent {
+			if err := s.files.Remove(p); err != nil {
+				errs = append(errs, p+": "+err.Error())
+				continue
+			}
+			deleted++
+			s.audit(r, "file_delete", p, "彻底删除")
+			continue
+		}
+		if _, err := s.trash.Put(abs, p); err != nil {
+			errs = append(errs, p+": "+err.Error())
+			continue
+		}
+		trashed++
+		s.audit(r, "file_trash", p, "移入回收站")
 	}
 	if len(errs) > 0 {
 		fail(w, http.StatusBadRequest, codeBadRequest, "部分删除失败："+strings.Join(errs, "；"))
 		return
 	}
-	ok(w, map[string]any{"deleted": len(req.Paths)})
+	ok(w, map[string]any{"trashed": trashed, "deleted": deleted})
 }
 
 type archiveReq struct {
