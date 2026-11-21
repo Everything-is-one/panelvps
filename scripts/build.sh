@@ -29,5 +29,17 @@ done
 
 echo
 ls -lh dist/
+
+# 校验和必须写成「<hash>  <纯文件名>」：早期版本用 `sha256sum bin/xxx` 生成，
+# 面板按资产名精确匹配时会找不到；Windows 上的 sha256sum 还会多带一个 * 前缀。
+: > dist/SHA256SUMS
+for f in dist/panelvps-linux-amd64 dist/panelvps-linux-arm64; do
+    [ -f "$f" ] || continue
+    sum="$(sha256sum "$f" | cut -d' ' -f1)"
+    printf '%s  %s\n' "$sum" "$(basename "$f")" >> dist/SHA256SUMS
+done
+echo "[*] dist/SHA256SUMS:"
+cat dist/SHA256SUMS
+
 echo
 du -sh dist/* | awk '{print $2, $1}'

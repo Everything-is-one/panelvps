@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -256,10 +257,15 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		if info.ChecksumURL != "" {
 			log("校验 sha256")
 			okSum, err := selfupdate.Verify(ctx, info.ChecksumURL, info.AssetName, newBin)
-			if err != nil {
+			var skip *selfupdate.ChecksumSkip
+			switch {
+			case errors.As(err, &skip):
+				// 校验和拿不到不该把人卡在旧版本上：来源仍是 GitHub 的 https，
+				// 后面 Apply 还会检查 ELF 头。真算出来对不上才中止。
+				log(skip.Reason + "，已跳过校验")
+			case err != nil:
 				return err
-			}
-			if !okSum {
+			case !okSum:
 				log("发布未提供可用的校验和，已跳过")
 			}
 		} else {

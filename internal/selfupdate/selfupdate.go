@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -203,7 +204,74 @@ func Download(ctx context.Context, assetURL, dest string) error {
 	return nil
 }
 
-// Verify 用 checksums.txt 校验文件。checksumURL 为空时跳过并返回 false。
+// ChecksumSkip 表示校验和拿不到（下载失败、或文件里没有该条目）。
+// 这不是安全错误：来源仍是 GitHub 的 HTTPS，调用方可以降级为「跳过校验」，
+// 只在哈希算出来对不上时才必须中止。
+type ChecksumSkip struct{ Reason string }
+
+func (e *ChecksumSkip) Error() string { return e.Reason }
+
+// parseChecksum 从一行校验和里取 (hash, 文件名)。
+//
+// 实际撞到过的写法都得认：
+//
+//	<hash>  panelvps-linux-amd64      GNU 文本模式
+//	<hash> *panelvps-linux-amd64      GNU 二进制模式（Windows 上的 sha256sum）
+//	<hash>  bin/panelvps-linux-amd64  带任意目录前缀
+//	SHA256 (panelvps-linux-amd64) = <hash>   BSD / shasum
+func parseChecksum(line string) (hash, name string, ok bool) {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return "", "", false
+	}
+	if i := strings.Index(line, "("); i > 0 {
+		if j := strings.Index(line[i:], ") = "); j > 0 {
+			h := strings.ToLower(strings.TrimSpace(line[i+j+4:]))
+			n := strings.TrimSpace(line[i+1 : i+j])
+			if isHexSum(h) && n != "" {
+				return h, checksumBase(n), true
+			}
+		}
+	}
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return "", "", false
+	}
+	h := strings.ToLower(fields[0])
+	if !isHexSum(h) {
+		return "", "", false
+	}
+	// 文件名理论上可以带空格，所以从第二个字段一直拼到行尾。
+	return h, checksumBase(strings.Join(fields[1:], " ")), true
+}
+
+// checksumBase 去掉 sha256sum 可能带上的 * 标记与目录前缀，只留基名。
+func checksumBase(name string) string {
+	name = strings.TrimSpace(name)
+	name = strings.TrimPrefix(name, "*")
+	name = strings.TrimPrefix(name, "./")
+	return path.Base(name)
+}
+
+// isHexSum 判断是不是 64 位十六进制。
+func isHexSum(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// Verify 用校验和文件核对下载到的二进制。
+//
+// 返回值 semantics：verified=true 表示核对通过；false + nil 表示没有校验和可用。
+// 返回 *ChecksumSkip 时调用方可以降级跳过，只有哈希不匹配才是必须中止的错误。
 func Verify(ctx context.Context, checksumURL, assetName, filePath string) (bool, error) {
 	if checksumURL == "" {
 		return false, nil
@@ -219,20 +287,22 @@ func Verify(ctx context.Context, checksumURL, assetName, filePath string) (bool,
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("下载校验和失败: %s", resp.Status)
+		return false, &ChecksumSkip{Reason: "校验和文件下载失败（" + resp.Status + "）"}
 	}
 
 	want := ""
 	sc := bufio.NewScanner(io.LimitReader(resp.Body, 1<<20))
 	for sc.Scan() {
-		fields := strings.Fields(sc.Text())
-		if len(fields) == 2 && strings.TrimPrefix(fields[1], "*") == assetName {
-			want = strings.ToLower(fields[0])
+		if h, name, ok := parseChecksum(sc.Text()); ok && name == assetName {
+			want = h
 			break
 		}
 	}
+	if err := sc.Err(); err != nil {
+		return false, err
+	}
 	if want == "" {
-		return false, fmt.Errorf("校验和文件中没有 %s", assetName)
+		return false, &ChecksumSkip{Reason: "校验和文件里没有 " + assetName}
 	}
 
 	f, err := os.Open(filePath)
