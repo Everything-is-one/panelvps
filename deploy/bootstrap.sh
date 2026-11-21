@@ -175,6 +175,9 @@ fetch_bin() {
             || die "下载失败：直链与 API 均不可用。公开仓库需先发布 Release；否则请用 --base 指定自建分发"
     fi
     chmod 0755 "$out"
+    # 资产名带架构后缀（便于同一个 SHA256SUMS 覆盖两个架构），
+    # 但 install.sh 统一按 bin/panelvps 查找，这里补一份同名副本。
+    cp -f "$out" "$TMP/bin/panelvps"
 }
 
 # 校验清单也要按来源取：Release 资产不是仓库文件，raw 地址上没有它。
@@ -225,5 +228,5 @@ echo
 if [[ "$CHECK_ONLY" -eq 1 ]]; then
     bash "$TMP/install.sh" --check
 else
-    bash "$TMP/install.sh"
+    PV_BIN="$TMP/bin/panelvps" bash "$TMP/install.sh"
 fi

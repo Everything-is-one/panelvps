@@ -191,11 +191,15 @@ if [[ "$ACTION" == "--uninstall" ]]; then
 fi
 
 # ---------- 定位二进制 ----------
-SRC=""
-for p in "$(dirname "$0")/bin/panelvps" "$(dirname "$0")/panelvps" "./bin/panelvps" "/opt/panelvps/bin/panelvps.new"; do
-    if [[ -f "$p" ]]; then SRC="$p"; break; fi
-done
-[[ -n "$SRC" ]] || die "找不到 panelvps 二进制（请把脚本与 bin/panelvps 放在同一目录）"
+# bootstrap.sh 会通过 PV_BIN 指过来；手工执行时按约定目录查找。
+SRC="${PV_BIN:-}"
+if [[ -z "$SRC" ]]; then
+    for p in "$(dirname "$0")/bin/panelvps" "$(dirname "$0")/panelvps" "./bin/panelvps" "/opt/panelvps/bin/panelvps.new"; do
+        if [[ -f "$p" ]]; then SRC="$p"; break; fi
+    done
+fi
+[[ -n "$SRC" ]] || die "找不到 panelvps 二进制：请用 PV_BIN=/path/to/panelvps 指定，或把脚本与 bin/panelvps 放在同一目录"
+[[ -f "$SRC" ]] || die "PV_BIN 指向的二进制不存在: $SRC"
 
 # ---------- 环境检查 ----------
 ARCH=$(uname -m)
@@ -283,13 +287,19 @@ PORT=$(grep -E '^listen:' "$CONF" | awk '{print $2}' | awk -F: '{print $2}' || t
 PORT=${PORT:-20873}
 
 # 新装时把初始密码从 journald 里取出来直接显示，省掉手工 grep。
-# 密码字符集含 "="，slog 遇到会加引号，所以按行尾截取再去引号，不能按空格切。
+# 优先解析 slog 的 JSON 行（"password":"..."），其次是启动横幅里的「密  码: ...」。
 INIT_PWD=""
 if [[ "$NEW_INSTALL" == "1" ]] && command -v journalctl >/dev/null 2>&1; then
-    INIT_PWD=$(journalctl -u panelvps --no-pager -n 200 2>/dev/null \
-        | grep ' password=' | tail -1 | sed 's/.* password=//' || true)
-    INIT_PWD=${INIT_PWD#\"}
-    INIT_PWD=${INIT_PWD%\"}
+    # journald 落盘有延迟，最多等 5 秒
+    for _ in 1 2 3 4 5; do
+        LOG=$(journalctl -u panelvps --no-pager -n 200 2>/dev/null || true)
+        INIT_PWD=$(printf '%s\n' "$LOG" | sed -n 's/.*"password":"\([^"]*\)".*/\1/p' | tail -1)
+        if [[ -z "$INIT_PWD" ]]; then
+            INIT_PWD=$(printf '%s\n' "$LOG" | sed -n 's/^[[:space:]]*密[[:space:]]*码:[[:space:]]*//p' | tail -1)
+        fi
+        if [[ -n "$INIT_PWD" ]]; then break; fi
+        sleep 1
+    done
 fi
 
 echo
@@ -300,7 +310,7 @@ if [[ -n "$INIT_PWD" ]]; then
     echo " 用户名: admin"
     echo " 密  码: $INIT_PWD"
 else
-    echo " 密码: journalctl -u panelvps --no-pager | grep password="
+    echo " 密码: journalctl -u panelvps --no-pager | grep password"
     echo "       （已装过则沿用原密码；忘了可 panelvps reset-password）"
 fi
 echo
