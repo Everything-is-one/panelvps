@@ -11,17 +11,22 @@ README 只讲「能做什么」，本文讲「做到什么程度、为什么这�
 
 ## 内存口径
 
-概览把内存切成三档，刻意不用 `free` 的「used」：
+概览把内存切成三档，三档必然满足 `实际 + 可回收 + 空闲 = 总量`：
 
 | 档 | 算法 | 含义 |
 |---|---|---|
 | 实际 | `MemTotal - MemAvailable` | 真占住了、要回收就得动手的量 |
-| 缓存 | `Cached + Buffers + SReclaimable - Shmem` | 随手可丢的页缓存，高不是问题 |
-| 空闲 | `总量 - 实际 - 缓存` | 真正闲置的部分 |
+| 可回收 | `MemAvailable - MemFree` | 内核认为能收回来还给应用的部分（页缓存 + 可回收 slab） |
+| 空闲 | `MemFree` | 真正没人用的页，与 `free(1)` 的 free 列一致 |
 
-为什么不用 `MemFree` 当空闲：内核会把空闲内存全拿去做页缓存，`MemFree` 长期只剩几十
-MB，机器明明没事却像要爆了。减 `Shmem` 是因为 tmpfs 在没有 swap 时收不回来，算进
-「缓存」会让人以为随时能还。
+早先「缓存」取 `Cached + Buffers + SReclaimable - Shmem`、「空闲」用减法推，两列会打架：
+页缓存里有一部分页内核不会算进 `MemAvailable`（块设备元数据页、被映射钉住的页），
+它既算在「实际」里、又被全量缓存算一遍，同一块内存记了两次。现场一台 960MB 的机器上
+`free -m` 报空闲 327MB，面板只敢报 171MB。现在空闲直接取 `MemFree`，可回收取两者之间
+余下的部分，差额另存为「页缓存（暂不可回收）」放进「实际」的构成里。
+
+> `free -m` 的三列同样不能相加：它的 used 是 `总量 - available`，buff/cache 却是全量缓存，
+> 现场那台 `291 + 327 + 499 = 1117 > 960`。这不是内存泄漏，是两列口径不同。面板做的是严格三分。
 
 **「实际」为什么远大于前 5 名进程之和？** 因为这个数是全机的，而进程排行只列头部：
 
@@ -30,20 +35,22 @@ MB，机器明明没事却像要爆了。减 `Shmem` 是因为 tmpfs 在没有 s
 | 进程匿名 | `AnonPages` | 堆、栈、Go heap、`mmap(MAP_ANON)`，**所有进程**加总 |
 | tmpfs / 共享内存 | `Shmem` | 无 swap 收不回，所以算实际占用 |
 | 内核 | `SUnreclaim + KernelStack + PageTables` | slab、内核栈、页表 |
+| 页缓存（暂不可回收） | 全量缓存 - 可回收 | 内核不肯算进 available 的那部分缓存，实测常是最大的一块 |
 | 其它 | 余项 | per-cpu、vmalloc、驱动缓冲等 |
 
-容器口径下这四项改读 `memory.stat`（`anon` / `shmem` / `slab_unreclaimable`），
+容器口径下这几项改读 `memory.stat`（`anon` / `shmem` / `slab_unreclaimable`），
 因为 `/proc/meminfo` 在容器里报的是宿主机的数。
 
 还有一处容易误会：**RSS 会重复计算共享页**（每个进程都把自己映射到的共享库算进
 自己的 RSS），所以「所有进程 RSS 之和」不能和「实际占用」直接相减。它只适合回答
-「前 5 之外的那些进程大概占多少」。
+「前 5 之外的那些进程大概占多少」。实测一台机器上 RSS 合计 181MB、`AnonPages` 只有 56MB，
+差的 125MB 就是被各进程重复计入的共享页。
 
 排查用的命令：
 
 ```bash
 free -m
-grep -E 'MemTotal|MemAvailable|AnonPages|Shmem|SUnreclaim|KernelStack|PageTables' /proc/meminfo
+grep -E 'MemTotal|MemAvailable|MemFree|Buffers|Cached|SReclaimable|Shmem|AnonPages|SUnreclaim|KernelStack|PageTables' /proc/meminfo
 ps -eo rss= | awk '{s+=$1} END {printf "所有进程 RSS 合计 %.0f MB\n", s/1024}'
 sudo slabtop -o -s c | head -12
 ```
