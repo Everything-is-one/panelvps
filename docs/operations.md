@@ -84,6 +84,35 @@ flush 前记下现有封禁、重建后按剩余时间补回，避免一次下�
 只发送攻击来源 IP 本身，不发送任何面板数据。查询失败（机器不出网、接口不可用）时该列
 显示「—」，不影响其余功能；也可以关掉 `geoip_enabled` 省下这几秒。
 
+### 默认放行与默认拒绝
+
+面板的防火墙有两种链尾策略，安全页「模式」卡片显示当前是哪一种：
+
+| 模式 | 内核里的链尾 | 实际效果 |
+|---|---|---|
+| **默认放行**（黑名单，出厂值） | `policy accept` | 规则列表里没有的端口**本来就能连通**，规则只用来拦你显式加进去的 IP 或端口 |
+| **默认拒绝**（白名单） | `counter drop` | 除已放行的端口外一律拒绝 |
+
+这里有个容易误解的地方：出厂是「默认放行」，此时你新建中转、新建入站、装个 Redis
+都能直接连上——**不是因为防火墙放行了它们，而是因为它根本没在拦**。以为自己在用
+防火墙挡端口、实际全开，是这类面板最常见的安全错觉。安全页顶部的橙色提示条就是
+在讲这件事。
+
+点「切换为默认拒绝」时：
+
+- 面板先扫一遍 `/proc/net/*`，把**当前对外监听**（非 `127.0.0.1`）的端口逐个补一条
+  `accept` 规则，再改链尾为 `drop`。不这么做，点下去的瞬间站点、宝塔、Docker 的端口
+  会一起断掉
+- 确认框会先把这批端口列出来，看清楚再点
+- SSH 端口与面板端口由 `Render` 强制排在最前（`ssh (panelvps safety)` /
+  `panel (panelvps safety)`），任何模式下都不会把自己锁在外面
+- 只看回环的端口不加规则——它们本来就不该对外
+
+之后新建入站、中转时会自动补对应端口的放行规则，备注带 `[auto]` 前缀；删除或改端口
+时收回。手工加的规则不带这个前缀，永远不会被自动清理。
+
+切回「默认放行」只删掉那条链尾 `drop`，已放行的规则全部保留。
+
 ## 代理（Xray）契约
 
 | 能力 | 说明 |
@@ -159,6 +188,7 @@ REALITY 层，先核对客户端里的**公钥（pbk）与 shortId** 是否与�
 | 证书 | certbot webroot 模式（HTTP-01），异步任务执行；域名与邮箱先校验格式 |
 | 软件商店 | 清单只允许 7 种动作：`apt / download / extract / write_file / path / service / check`，**不含自由脚本** |
 | 安装前检查 | 已装则跳过、冲突与依赖校验、下载必须 https 且拒绝内网/回环地址、剩余内存不足一半直接拦截 |
+| 包管理 | `apt-get install -y --no-install-recommends`；回滚时 `stop`/`disable` 对**不存在的单元按成功处理**（apt 没装上就不该再报一次 `Unit not loaded`，那会把真正的失败原因盖住） |
 | 目录预检 | 动手前先对计划写入的目录做真实写入探测，不可写就在下载安装包之前失败，并给出修复命令 |
 | 回滚 | 任一步失败按逆序撤销已执行的写文件/服务动作；非 Linux 直接 501，不假装能装 |
 
@@ -215,6 +245,23 @@ ReadWritePaths=-/usr/local/bin -/usr/local/share -/usr/local/etc -/etc/systemd/s
 注意：面板自带的 Web 终端不能用来修这类问题 —— 它是面板的子进程，继承同一份只读 mount
 namespace；`sudo` 也会失败（`setresuid(...): Operation not permitted`），因为单元里开了
 `RestrictSUIDSGID`。终端本身已经是 root，不需要 `sudo`。
+
+### 能力集与 CAP_FOWNER
+
+单元用 `CapabilityBoundingSet` 把能力收窄到面板真正需要的几项。其中 `CAP_FOWNER` 是
+apt 带来的硬需求，少了它会看到：
+
+```
+W: chmod 0600 of file /var/lib/apt/lists/partial/..._InRelease failed
+   - Item::QueueURI (1: Operation not permitted)
+```
+
+原因：apt 的 sandbox 用 `_apt` 用户下载，落到 `lists/partial` 的文件属主是 `_apt`，
+root 再去改权限时**对不属于自己的文件 chmod 需要 `CAP_FOWNER`**（`CAP_CHOWN` 只管改属主，
+不管改权限位）。这些只是 warning，apt 不会中断，所以很容易被当成噪音忽略 —— 但同样的
+权限检查会被文件管理器改权限、站点部署 `chown/chmod` 用到。
+
+`install.sh --check` 会核对单元里有没有 `CAP_FOWNER`。老单元按上一条的方式覆盖即可。
 
 ## 入口与内核调优
 
