@@ -929,10 +929,16 @@ table.du-table td.du-name { max-width: 320px; overflow: hidden; text-overflow: e
 /* ---------- 安全记录 ---------- */
 
 .sec-ip { font-variant-numeric: tabular-nums; }
-/* 归属地：国家名长度差很大（「美国」两字 vs 「特立尼达和多巴哥」八字），
- * 不设宽度会把整行拉宽，设成固定宽度再走省略号，鼠标悬停看全称。 */
+.sec-ip > span { display: block; }
+/* 窄屏专用的地址副行，宽屏有独立列时不需要。
+ * 必须带 .sec-ip 前缀：单独写 .sec-ip-geo 的特异性(0,1,0) 低于上面
+ * 那条 .sec-ip > span 的(0,1,1)，display:none 会被 block 盖掉。 */
+.sec-ip > .sec-ip-geo { display: none; }
+/* 归属地：拼到「国家 省 市」后长度差很大（「日本 东京都 千代田区」vs
+ * 「特立尼达和多巴哥 圣胡安-拉文蒂耶」），不设宽度会把整行拉宽，
+ * 设成固定宽度再走省略号，鼠标悬停看全称。 */
 .sec-geo {
-  display: inline-block; max-width: 96px;
+  display: inline-block; max-width: 168px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   vertical-align: bottom;
 }
@@ -941,10 +947,21 @@ table.du-table td.du-name { max-width: 320px; overflow: hidden; text-overflow: e
   color: var(--text-2); font-size: 13px;
 }
 /* 窄屏（含侧边栏约 780px 主区）放不下七列：先舍「最近一次」，
- * 比让整张表横向滚动更好读——时间是次要信息。 */
+ * 再把归属地并到 IP 下面——总比让整张表横向滚动、把「操作」列
+ * 推到看不见要好。时间与省级细节在这里都属于次要信息。 */
 @media (max-width: 1180px) {
   table.sec-table th:nth-child(5), table.sec-table td:nth-child(5) { display: none; }
+  table.sec-table th:nth-child(3), table.sec-table td:nth-child(3) { display: none; }
   .sec-detail { max-width: 200px; }
+  .sec-ip > .sec-ip-geo {
+    display: block; margin-top: 3px;
+    /* 地址是中文地名，用回正文字体比等宽好看；td 上带了 .mono，
+     * 这里必须显式覆盖，inherit 会把 mono 一起继承下来。 */
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+    font-size: 11.5px; color: var(--muted);
+    max-width: 112px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
 }
 
 /* ---------- 响应式补充 ---------- */

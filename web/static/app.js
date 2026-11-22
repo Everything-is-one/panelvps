@@ -2839,11 +2839,19 @@ function renderSecurityView(root) {
       const records = d.records || [];
       const rows = records.map((r) => {
         const src = SEC_SOURCE[r.source] || [r.source, "muted"];
-        // 归属地列：国家名可能很长（「特立尼达和多巴哥」），
-        // 列宽固定、超出省略号，鼠标悬停看完整值。
-        const geo = r.country || "—";
+        // 归属地列：优先用后端拼好的「国家 省 市」，老服务端没有 addr
+        // 字段时退回国家名。列宽固定、超出省略号，悬停看全文（附国家代码）。
+        const geo = r.addr || r.country || "—";
+        const geoTip = r.country_code ? geo + "（" + r.country_code + "）" : geo;
         const geoCell = el("td", {}, [
-          el("span", { class: "sec-geo", text: geo, title: r.country_code ? geo + " (" + r.country_code + ")" : geo }),
+          el("span", { class: "sec-geo", text: geo, title: geoTip }),
+        ]);
+        // 窄屏（≤1180）容不下七列：那一档隐藏独立的归属地列，把地址缩成
+        // 一行小字挂在 IP 下面，省出的宽度留给「操作」——否则按钮会被
+        // 挤出容器直接看不见。宽屏下这行不显示。
+        const ipCell = el("td", { class: "mono sec-ip" }, [
+          el("span", { text: r.ip }),
+          el("span", { class: "sec-ip-geo", text: geo, title: geoTip }),
         ]);
         // 过硬的 IP 直接给「永久封禁」：临时封一小时对这类来源没有意义，
         // 放出来它还会接着打。
@@ -2861,7 +2869,7 @@ function renderSecurityView(root) {
         }
         return el("tr", {}, [
           el("td", {}, [badge(src[0], src[1])]),
-          el("td", { class: "mono sec-ip", text: r.ip }),
+          ipCell,
           geoCell,
           el("td", {}, [badge(String(r.count), r.count >= 20 ? "err" : "warn")]),
           el("td", { class: "mono muted", text: r.last || "-" }),
@@ -4066,10 +4074,12 @@ function renderSettingsView(root) {
     ]),
     card("服务单元", [unitBox]),
     (updateCard = card("版本更新", [
+      // 按钮与说明拆成两行：说明有一整句长文案，与按钮挤在同一行时
+      // 会被 flex 压成窄条、换行位置随窗口宽度乱跳，视觉上像贴着按钮。
       el("div", { class: "actions", style: "margin-top:0" }, [
         el("button", { text: "检查更新", onclick: manualCheck }),
-        el("span", { class: "hint", text: "打开本页会自动检查；也可以随时手动回源。更新从 GitHub Release 下载，校验 sha256 后原子替换，保留上一版" }),
       ]),
+      el("div", { class: "hint", style: "margin-top:10px", text: "打开本页会自动检查；也可以随时手动回源。更新从 GitHub Release 下载，校验 sha256 后原子替换，保留上一版" }),
       updateBox,
     ])),
   );

@@ -49,3 +49,25 @@ func TestCacheSkipsSecondLookup(t *testing.T) {
 		t.Fatalf("缓存未命中: %v", got)
 	}
 }
+
+// Addr 拼地址时要吃掉重复段：ip-api 对北京 / 新加坡这类城市国家
+// 会把同名值同时塞进 region 和 city，直接拼就是「北京 北京」。
+func TestInfoAddr(t *testing.T) {
+	cases := []struct {
+		name string
+		in   Info
+		want string
+	}{
+		{"国家省市齐全", Info{Country: "美国", Region: "加利福尼亚州", City: "洛杉矶"}, "美国 加利福尼亚州 洛杉矶"},
+		{"只有国家", Info{Country: "新加坡", Code: "SG"}, "新加坡"},
+		{"省市重名", Info{Country: "中国", Region: "北京", City: "北京"}, "中国 北京"},
+		{"三段都重名", Info{Country: "新加坡", Region: "新加坡", City: "新加坡"}, "新加坡"},
+		{"省市为空但有空格", Info{Country: "荷兰", Region: "  ", City: "阿姆斯特丹"}, "荷兰 阿姆斯特丹"},
+		{"全空", Info{}, ""},
+	}
+	for _, c := range cases {
+		if got := c.in.Addr(); got != c.want {
+			t.Errorf("%s: Addr() = %q, want %q", c.name, got, c.want)
+		}
+	}
+}

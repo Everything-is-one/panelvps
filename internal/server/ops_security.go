@@ -20,9 +20,11 @@ type securityRecord struct {
 	Detail string `json:"detail"`
 	Banned bool   `json:"banned"`
 	// Country 与 CountryCode 由 geoip 回填；查不到时为空，
-	// 前端显示「—」而不是报错。
+	// 前端显示「—」而不是报错。Addr 是拼好的「国家 省 市」，
+	// 主干网出口 IP 往往只到国家一级，省市级会自然缺省。
 	Country     string `json:"country,omitempty"`
 	CountryCode string `json:"country_code,omitempty"`
+	Addr        string `json:"addr,omitempty"`
 	// Permanent 表示该 IP 已被长期封禁（区别于 ban_minutes 的临时封禁）。
 	Permanent bool `json:"permanent,omitempty"`
 }
@@ -146,6 +148,7 @@ func (s *Server) handleSecurityRecords(w http.ResponseWriter, r *http.Request) {
 				if info, ok := infos[records[i].IP]; ok {
 					records[i].Country = info.Country
 					records[i].CountryCode = info.Code
+					records[i].Addr = info.Addr()
 				}
 			}
 		}

@@ -20,9 +20,30 @@ import (
 )
 
 // Info 是一个 IP 的归属地。
+//
+// Region 与 City 只在国际库有覆盖时才有值：主干网出口 IP（尤其是云厂商）
+// 常常只到国家一级，这两个字段就是空的，前端拼地址时自动跳过。
 type Info struct {
 	Country string `json:"country"` // 中文名，取不到时回落到国家代码
 	Code    string `json:"code"`    // ISO 3166-1 alpha-2
+	Region  string `json:"region"`  // 一级行政区：省 / 州
+	City    string `json:"city"`    // 城市
+}
+
+// Addr 拼成可读地址：「中国 广东省 深圳市」。
+// 省与市重名（直辖市、城市州）时只留一个，避免「北京 北京 北京」。
+func (i Info) Addr() string {
+	parts := make([]string, 0, 3)
+	seen := make(map[string]bool, 3)
+	for _, p := range []string{i.Country, i.Region, i.City} {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		parts = append(parts, p)
+	}
+	return strings.Join(parts, " ")
 }
 
 type cacheEntry struct {
@@ -134,7 +155,7 @@ func (r *Resolver) fetchIPAPI(ctx context.Context, ips []string) map[string]Info
 		return nil
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"http://ip-api.com/batch?fields=status,country,countryCode,query&lang=zh-CN",
+		"http://ip-api.com/batch?fields=status,country,countryCode,regionName,city,query&lang=zh-CN",
 		bytes.NewReader(body))
 	if err != nil {
 		return nil
@@ -152,6 +173,8 @@ func (r *Resolver) fetchIPAPI(ctx context.Context, ips []string) map[string]Info
 		Status      string `json:"status"`
 		Country     string `json:"country"`
 		CountryCode string `json:"countryCode"`
+		RegionName  string `json:"regionName"`
+		City        string `json:"city"`
 		Query       string `json:"query"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
@@ -162,7 +185,12 @@ func (r *Resolver) fetchIPAPI(ctx context.Context, ips []string) map[string]Info
 		if row.Status != "success" || row.Query == "" {
 			continue
 		}
-		out[row.Query] = Info{Country: row.Country, Code: strings.ToUpper(row.CountryCode)}
+		out[row.Query] = Info{
+			Country: row.Country,
+			Code:    strings.ToUpper(row.CountryCode),
+			Region:  row.RegionName,
+			City:    row.City,
+		}
 	}
 	return out
 }
