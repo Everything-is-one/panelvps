@@ -24,6 +24,8 @@
   --accent-hover: #4338ca;
   --accent-soft: #eef1fe;
   --accent-border: #c9d0fb;
+  /* 可回收缓存的专用灰：要能从 surface-3 底槽里区分出来，又不能像强调色那样抢眼 */
+  --cache: #c3cad8;
   --danger: #d92d20;
   --danger-soft: #fef3f2;
   --ok: #067647;
@@ -257,6 +259,31 @@ p.sub { color: var(--muted); margin: 6px 0 0; font-size: 13.5px; line-height: 1.
 }
 .bar.warn > i { background: #f79009; }
 .bar.crit > i { background: var(--danger); }
+
+/* 分段条（目前只有内存用）：实际占用 + 可回收缓存，剩下的宽度即空闲。
+ * 高度加到 6px，4px 里塞两段分不出边界。缓存段用中性灰而不是第二种彩色：
+ * 面板的配色约定是单一强调色，缓存本来也不是「问题」，不该抢视线。 */
+.bar.stacked { display: flex; height: 6px; }
+.bar.stacked > i { border-radius: 0; flex: 0 0 auto; }
+.bar.stacked > i:first-child { border-radius: 999px 0 0 999px; }
+.bar.stacked > i:last-child { border-radius: 0 999px 999px 0; }
+/* 只有一段时（缓存为 0）要被当成完整的圆角条，不然左右各被削一半 */
+.bar.stacked > i:only-child { border-radius: 999px; }
+.bar.stacked > i.used { background: var(--accent); }
+.bar.stacked > i.used.warn { background: #f79009; }
+.bar.stacked > i.used.crit { background: var(--danger); }
+.bar.stacked > i.cache { background: var(--cache); }
+
+/* 图例：色点与分段条一一对应 */
+.legend { display: flex; flex-wrap: wrap; align-items: center; column-gap: 10px; row-gap: 4px; }
+.legend .lg-item { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.legend .lg-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.legend .lg-dot.used { background: var(--accent); }
+.legend .lg-dot.used.warn { background: #f79009; }
+.legend .lg-dot.used.crit { background: var(--danger); }
+.legend .lg-dot.cache { background: var(--cache); }
+.legend .lg-dot.free { background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--border-strong); }
+.legend .lg-total { color: var(--muted-2); }
 
 .row { display: flex; gap: 10px; align-items: center; }
 .row.wrap { flex-wrap: wrap; row-gap: 10px; }

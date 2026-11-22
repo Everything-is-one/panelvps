@@ -99,7 +99,7 @@ func sampleProcesses() ([]TopProc, error) {
 		elapsed = topSampleGap.Seconds()
 	}
 
-	memTotal, _, _, _ := memInfo()
+	memTotal := memInfo().Total
 	// 容器里 /proc/meminfo 报的是宿主机内存，占比要用 cgroup 限额做分母
 	if lim, _ := cgroupMem(); lim > 0 && lim < memTotal {
 		memTotal = lim

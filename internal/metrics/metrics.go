@@ -30,11 +30,16 @@ type Snapshot struct {
 	Supported  bool    `json:"supported"`
 	PanelRSS   uint64  `json:"panel_rss"`
 	Goroutines int     `json:"goroutines"`
-	// MemCache 是 cgroup 口径下可回收的文件页缓存（memory.stat 的 file
-	// 减去 tmpfs 的 shmem），不计入 MemUsed。单独带出来是为了让概览能
-	// 写清「已用 + 缓存 = 容器总量」，不至于把升级时写盘产生的缓存当成
-	// 内存泄漏。
+	// MemCache 是「可回收的页缓存」，不计入 MemUsed。cgroup 口径下取
+	// memory.stat 的 file 减 tmpfs 的 shmem；宿主机口径下取
+	// Cached + Buffers + SReclaimable - Shmem。单独带出来是为了让概览能
+	// 写清「已用 + 缓存 + 空闲 = 总量」，不至于把升级时写盘产生的缓存
+	// 当成内存泄漏。
 	MemCache uint64 `json:"mem_cache"`
+	// MemFree 是扣掉缓存之后真正闲置的部分（total - used - cache），
+	// 不是 /proc/meminfo 的 MemFree——后者把页缓存也算作空闲，会让人
+	// 以为内存一直很宽裕。
+	MemFree uint64 `json:"mem_free"`
 	// Container 表示内存与 CPU 数据来自 cgroup 限额而非宿主机 /proc。
 	// LXC 默认不挂 lxcfs 时，/proc 报的是宿主机数据，必须用 cgroup 纠正。
 	Container bool `json:"container"`
@@ -68,7 +73,9 @@ func (c *Collector) Collect() Snapshot {
 	}
 	s.Supported = true
 
-	s.MemTotal, s.MemUsed, s.SwapTotal, s.SwapUsed = memInfo()
+	mem := memInfo()
+	s.MemTotal, s.MemUsed, s.MemCache, s.MemFree = mem.Total, mem.Used, mem.Cache, mem.Free
+	s.SwapTotal, s.SwapUsed = mem.SwapTotal, mem.SwapUsed
 
 	// 只有 cgroup 限额明显小于物理内存时才认为读到了容器视角。
 	// 真机上 memory.max 要么是 "max"，要么等于物理内存，这里不会命中。
@@ -77,6 +84,7 @@ func (c *Collector) Collect() Snapshot {
 	// 可回收的缓存报成进程占用。
 	if lim, use, cache := cgroupMemDetail(); lim > 0 && lim < s.MemTotal {
 		s.MemTotal, s.MemUsed, s.MemCache = lim, use, cache
+		s.MemFree = memFreeOf(lim, use, cache)
 		if use > lim {
 			s.MemUsed = lim
 		}
@@ -191,22 +199,95 @@ func (c *Collector) cpuPercentLocked() float64 {
 	return pct
 }
 
-func memInfo() (total, used, swapTotal, swapUsed uint64) {
-	f, err := os.Open("/proc/meminfo")
-	if err != nil {
-		return
-	}
-	defer f.Close()
+// memStats 是 /proc/meminfo 换算出来的内存三档。单位字节。
+type memStats struct {
+	Total     uint64
+	Used      uint64 // 实际占用：总量 - MemAvailable
+	Cache     uint64 // 可回收页缓存
+	Free      uint64 // 真正闲置：总量 - 占用 - 缓存
+	SwapTotal uint64
+	SwapUsed  uint64
+}
 
-	vals := make(map[string]uint64, 8)
-	sc := bufio.NewScanner(f)
+func memInfo() memStats {
+	raw, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return memStats{}
+	}
+	return parseMemInfo(string(raw))
+}
+
+// parseMemInfo 把 /proc/meminfo 的内容拆成「实际占用 / 可回收缓存 / 空闲」。
+//
+// 为什么不用 MemFree 当空闲：内核会拿空闲内存去做页缓存，MemFree 长期只剩
+// 几十 MB，机器明明没事却像要爆了。所以沿用
+//
+//	已用 = 总量 - MemAvailable
+//
+// 再把可回收的那部分单独摘出来放在中间一档：
+//
+//	缓存 = Cached + Buffers + SReclaimable - Shmem
+//	空闲 = 总量 - 已用 - 缓存
+//
+// 减 Shmem 是因为 tmpfs 占住的页在没有 swap 时收不回来，算进「可回收」
+// 会让人以为随时能还（与 cgroup 口径的 file - shmem 保持一致）。
+func parseMemInfo(raw string) memStats {
+	vals := parseMeminfoVals(raw)
+
+	var m memStats
+	m.Total = vals["MemTotal"]
+
+	avail, ok := vals["MemAvailable"]
+	if !ok {
+		// 3.14 之前的内核没有 MemAvailable，退回旧公式
+		avail = vals["MemFree"] + vals["Buffers"] + vals["Cached"]
+	}
+	if m.Total > avail {
+		m.Used = m.Total - avail
+	}
+
+	cache := vals["Cached"] + vals["Buffers"] + vals["SReclaimable"]
+	if shm := vals["Shmem"]; shm < cache {
+		cache -= shm
+	} else {
+		cache = 0
+	}
+	// MemAvailable 的估算偏保守，used 有可能把一部分本该算缓存的页也
+	// 算进去；不夹一下会出错负数（uint64 下直接变成天文数字）。
+	if cache > m.Total-m.Used {
+		cache = m.Total - m.Used
+	}
+	m.Cache = cache
+	m.Free = m.Total - m.Used - m.Cache
+
+	m.SwapTotal = vals["SwapTotal"]
+	if m.SwapTotal > vals["SwapFree"] {
+		m.SwapUsed = m.SwapTotal - vals["SwapFree"]
+	}
+	return m
+}
+
+// memFreeOf 算限额里还剩多少，同样要防 uint64 下溢。
+func memFreeOf(total, used, cache uint64) uint64 {
+	if used >= total {
+		return 0
+	}
+	if cache >= total-used {
+		return 0
+	}
+	return total - used - cache
+}
+
+// parseMeminfoVals 把 meminfo 的文本读成 键 → 字节数。
+func parseMeminfoVals(raw string) map[string]uint64 {
+	vals := make(map[string]uint64, 32)
+	sc := bufio.NewScanner(strings.NewReader(raw))
 	for sc.Scan() {
 		line := sc.Text()
 		i := strings.IndexByte(line, ':')
 		if i < 0 {
 			continue
 		}
-		key := line[:i]
 		rest := strings.Fields(line[i+1:])
 		if len(rest) == 0 {
 			continue
@@ -216,22 +297,9 @@ func memInfo() (total, used, swapTotal, swapUsed uint64) {
 			continue
 		}
 		// /proc/meminfo 单位是 kB
-		vals[key] = v * 1024
+		vals[line[:i]] = v * 1024
 	}
-
-	total = vals["MemTotal"]
-	avail, ok := vals["MemAvailable"]
-	if !ok {
-		avail = vals["MemFree"] + vals["Buffers"] + vals["Cached"]
-	}
-	if total > avail {
-		used = total - avail
-	}
-	swapTotal = vals["SwapTotal"]
-	if swapTotal > vals["SwapFree"] {
-		swapUsed = swapTotal - vals["SwapFree"]
-	}
-	return
+	return vals
 }
 
 func loadAvg() (a, b, c float64) {

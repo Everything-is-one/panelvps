@@ -160,24 +160,52 @@ function pct(used, total) {
   return Math.min(100, Math.round((used / total) * 100));
 }
 
+// 指标字段容错：后端还没升级到带这个字段时按 0 处理，不要显示成 NaN。
+function numv(v) {
+  return typeof v === "number" && isFinite(v) ? v : 0;
+}
+
 // 千分位：目录里动辄十几万文件，184233 一眼看不出量级
 function fmtNum(n) {
   const v = Number(n) || 0;
   return v.toLocaleString("en-US");
 }
 
+// 占用率对应的进度条档位：危险/警告/正常。
+function barClass(percent) {
+  return percent >= 90 ? "bar crit" : percent >= 75 ? "bar warn" : "bar";
+}
+
 function bar(percent) {
-  const cls = percent >= 90 ? "bar crit" : percent >= 75 ? "bar warn" : "bar";
+  if (Array.isArray(percent)) return barStack(percent);
   const inner = el("i");
-  const box = el("div", { class: cls }, [inner]);
+  const box = el("div", { class: barClass(percent) }, [inner]);
   inner.style.width = percent + "%";
+  return box;
+}
+
+// 分段进度条：内存要同时标出「实际占用」和「可回收缓存」，
+// 剩下没画的宽度就是空闲。各段按占总量百分比给宽度，累计超过 100 的部分截掉。
+function barStack(segs) {
+  const box = el("div", { class: "bar stacked" });
+  let used = 0;
+  for (const seg of segs) {
+    const w = Math.max(0, Math.min(100 - used, Number(seg.pct) || 0));
+    if (w <= 0) continue;
+    used += w;
+    const inner = el("i", { class: seg.cls || "" });
+    inner.style.width = w + "%";
+    if (seg.title) inner.title = seg.title;
+    box.appendChild(inner);
+  }
   return box;
 }
 
 function statCard(key, value, desc, percent, topKind) {
   const kids = [el("div", { class: "k", text: key }), el("div", { class: "v", text: value })];
   if (percent !== undefined) kids.push(bar(percent));
-  if (desc) kids.push(el("div", { class: "d", text: desc }));
+  // desc 既可以是字符串，也可以是一个已构造好的节点（内存卡片要带色点图例）
+  if (desc) kids.push(typeof desc === "string" ? el("div", { class: "d", text: desc }) : desc);
   if (topKind) {
     // 磁盘卡片能点开明细，所以角标写「明细」而不是「前 5」：
     // 提示语和实际行为对不上，用户就会一直只 hover 不点。
@@ -809,15 +837,53 @@ function tableNoticeRow(text, cols, action) {
   return el("tr", {}, [cell]);
 }
 
-// 内存卡片的副标题。容器口径下后端已经把可回收的文件页缓存从「已用」里
-// 扣掉（memory.current 含 page cache），这里再把缓存写出来，让
-// 「已用 + 缓存 = 容器总量」这笔账能对上：升级一次面板要写十几 MB 的
-// 新二进制，缓存随之上涨，不写清楚很容易被当成内存泄漏。
-function memDetail(s) {
-  const base = (s.container ? "cgroup 限额 " : "共 ") + fmtBytes(s.mem_total);
-  const cache = typeof s.mem_cache === "number" ? s.mem_cache : 0;
-  if (cache < 16 * 1024 * 1024) return base;
-  return base + " · 缓存 " + fmtBytes(cache);
+// 内存卡片的明细行：色点 + 「实际占用 / 缓存 / 空闲」三个数。
+//
+// 只写「已用 / 总量」是不够的：内核会把空闲内存大量拿去做页缓存，
+// 于是同一条曲线在升级面板、解压大文件之后会突然抬起来，看着像泄漏。
+// 把可回收的缓存单独标出来，用户才能判断「要不要动手」——
+// 缓存高不用管，实际占用高才要查。
+// 内存水位：决定进度条与图例色点的颜色档位（图例必须跟着条走，
+// 否则会出现「条是红的、图例圆点还是靛蓝」这种自相矛盾的画面）。
+function memLevel(s) {
+  const usedPct = pct(numv(s.mem_used), numv(s.mem_total));
+  return usedPct >= 90 ? "crit" : usedPct >= 75 ? "warn" : "";
+}
+
+function memLegend(s) {
+  const total = numv(s.mem_total);
+  const used = numv(s.mem_used);
+  const cache = numv(s.mem_cache);
+  if (total <= 0) return "—";
+  const free = typeof s.mem_free === "number" ? numv(s.mem_free) : Math.max(0, total - used - cache);
+  const level = memLevel(s);
+  const item = (cls, text) => el("span", { class: "lg-item" }, [
+    el("i", { class: "lg-dot " + cls }), el("span", { text }),
+  ]);
+  const items = [item("used " + level, "实际 " + fmtBytes(used))];
+  // 缓存为 0 时不必硬写「缓存 0」：条上本来就没有那一段，写了只是噪音
+  if (cache > 0) items.push(item("cache", "缓存 " + fmtBytes(cache)));
+  items.push(item("free", "空闲 " + fmtBytes(free)));
+  items.push(el("span", { class: "lg-total", text: (s.container ? "限额 " : "共 ") + fmtBytes(total) }));
+  return el("div", { class: "d legend" }, items);
+}
+
+// 内存进度条的两段：实际占用（按水位变色）+ 可回收缓存（中性灰）。
+// 返回数组时 bar() 走分段渲染，剩余部分就是空闲。
+function memBars(s) {
+  const total = numv(s.mem_total);
+  const used = numv(s.mem_used);
+  const cache = numv(s.mem_cache);
+  if (total <= 0) return 0; // 没有数据时退回普通空进度条
+  const level = memLevel(s);
+  return [
+    {
+      pct: pct(used, total),
+      cls: "used" + (level ? " " + level : ""),
+      title: "实际占用 " + fmtBytes(used) + " / " + fmtBytes(total),
+    },
+    { pct: pct(cache, total), cls: "cache", title: "可回收缓存 " + fmtBytes(cache) + "（内存紧张时会自动回收）" },
+  ];
 }
 
 function renderOverviewView(root) {
@@ -913,7 +979,7 @@ function renderOverviewView(root) {
         statCard("CPU", s.cpu_pct ? num(s.cpu_pct).toFixed(1) + "%" : "—",
           (s.container ? "宿主负载 " : "负载 ") + num(s.load1).toFixed(2) + " / " + num(s.load5).toFixed(2) + " / " + num(s.load15).toFixed(2),
           Math.round(num(s.cpu_pct)), "cpu"),
-        statCard("内存", fmtBytes(s.mem_used), memDetail(s), pct(s.mem_used, s.mem_total), "mem"),
+        statCard("内存", fmtBytes(s.mem_used), memLegend(s), memBars(s), "mem"),
         statCard("磁盘", fmtBytes(s.disk_used), "共 " + fmtBytes(s.disk_total), pct(s.disk_used, s.disk_total), "disk"),
         statCard("面板占用", fmtBytes(s.panel_rss), num(s.goroutines) + " goroutines"),
       );
@@ -931,7 +997,7 @@ function renderOverviewView(root) {
         ["数据库", data.db_path],
         ["审计条数", String(data.audit_count)],
         ["版本", data.version],
-        ["采集口径", s.container ? "cgroup 限额（已扣可回收页缓存）" : "宿主机 /proc"],
+        ["采集口径", s.container ? "cgroup 限额（已扣可回收页缓存）" : "宿主机 /proc（已扣可回收缓存）"],
         ["运行时长", Math.floor(up / 3600) + " 小时 " + Math.floor((up % 3600) / 60) + " 分"],
       ];
       infoBody.replaceChildren.apply(infoBody, rows.map(([k, v]) =>
