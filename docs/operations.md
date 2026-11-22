@@ -387,22 +387,50 @@ sudo systemctl daemon-reload && sudo systemctl restart panelvps
 namespace；`sudo` 也会失败（`setresuid(...): Operation not permitted`），因为单元里开了
 `RestrictSUIDSGID`。终端本身已经是 root，不需要 `sudo`。
 
-### 能力集与 CAP_FOWNER
+### 能力集：CAP_FOWNER 与 CAP_NET_BIND_SERVICE
 
-单元用 `CapabilityBoundingSet` 把能力收窄到面板真正需要的几项。其中 `CAP_FOWNER` 是
-apt 带来的硬需求，少了它会看到：
+单元用 `CapabilityBoundingSet` 把能力收窄到面板真正需要的几项。少一个就会撞出一类症状，
+而且报错位置往往离真因很远。已经踩过的两个：
+
+**`CAP_FOWNER` —— apt 的一串 warning。** apt 的 sandbox 用 `_apt` 用户下载，落到
+`lists/partial` 的文件属主是 `_apt`，root 再去改权限时**对不属于自己的文件 chmod 需要
+`CAP_FOWNER`**（`CAP_CHOWN` 只管改属主，不管改权限位）。少了它会看到：
 
 ```
 W: chmod 0600 of file /var/lib/apt/lists/partial/..._InRelease failed
    - Item::QueueURI (1: Operation not permitted)
 ```
 
-原因：apt 的 sandbox 用 `_apt` 用户下载，落到 `lists/partial` 的文件属主是 `_apt`，
-root 再去改权限时**对不属于自己的文件 chmod 需要 `CAP_FOWNER`**（`CAP_CHOWN` 只管改属主，
-不管改权限位）。这些只是 warning，apt 不会中断，所以很容易被当成噪音忽略 —— 但同样的
-权限检查会被文件管理器改权限、站点部署 `chown/chmod` 用到。
+只是 warning，apt 不会中断，所以很容易被当成噪音忽略 —— 但同样的权限检查会被文件管理器
+改权限、站点部署 `chown/chmod` 用到。
 
-`install.sh --check` 会核对单元里有没有 `CAP_FOWNER`。老单元按上一条的方式覆盖即可。
+**`CAP_NET_BIND_SERVICE` —— 装 Nginx「装成功却判失败」。** 表现为最后一步校验炸掉：
+
+```
+[3/3] 校验 nginx -t
+nginx: [emerg] bind() to 0.0.0.0:80 failed (13: Permission denied)
+安装失败，开始回滚
+```
+
+`nginx -t` 除了查语法，还会**真的 bind 一遍每个 listen 指令**。它是面板的子进程，继承
+单元的能力边界集；内核在 `inet_bind` 里先查端口权限（`snum < 1024` 且无
+`CAP_NET_BIND_SERVICE` → `EACCES`），再查是否被占用。所以哪怕 nginx 自己（独立单元、
+能力完整）早就正常监听 80，面板这边也只拿到 EACCES。
+
+内核在 `EACCES` 与 `EADDRINUSE` 之间有确定的先后：**权限先判**，因此缺能力时永远看不到
+「端口被占用」这条更准确的诊断。
+
+从 v0.4.7 起两层都做了：
+
+- 单元补上 `CAP_NET_BIND_SERVICE`（面板也要直接绑低端口：中转规则常写 `:443`，
+  自身 `listen` 也可能配成 `:80`）；
+- 校验逻辑按 errno 分流，缺能力与「端口被自己占用」都不再判成安装失败
+  （`internal/bindfail`）。所以**即使单元还是旧的，0.4.7 也能把 Nginx 装上**，
+  只是日志里会带一行提示。
+
+`install.sh --check` 两项都核对。注意它先查「当前 shell」的能力（`CapEff`），再查
+**单元文件**里写的能力 —— 前者是 SSH 会话的，看不出单元有没有放行，两者的差别正是
+上面那个故障。
 
 ## 入口与内核调优
 
