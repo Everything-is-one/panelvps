@@ -296,6 +296,7 @@ func (s *Server) routes() {
 
 	// 日志
 	s.mux.HandleFunc("GET /api/v1/logs/sources", s.requireAuth(s.handleLogSources))
+	s.mux.HandleFunc("POST /api/v1/logs/clean", s.requireAuth(s.handleLogClean))
 	s.mux.HandleFunc("GET /api/v1/logs", s.requireAuth(s.handleLogs))
 
 	// 网站

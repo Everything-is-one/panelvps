@@ -7,6 +7,7 @@ package logs
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -27,6 +28,11 @@ type Source struct {
 	Kind    string `json:"kind"` // journal | file
 	Detail  string `json:"detail"`
 	Present bool   `json:"present"`
+	// Size 与 ModTime 只有文件来源有：journal 的落盘量由 journald 统一管理，
+	// 单个单元占多少没有便宜的查法（要跑一遍 journalctl --output=json），
+	// 所以那类来源留空，界面上改显示 journald 的总占用。
+	Size    int64  `json:"size,omitempty"`
+	ModTime string `json:"mtime,omitempty"`
 }
 
 // Result 是一次读取结果。
@@ -36,6 +42,10 @@ type Result struct {
 	Lines   []string `json:"lines"`
 	Note    string   `json:"note,omitempty"`
 	HasMore bool     `json:"has_more"`
+	// Size 是来源文件此刻的字节数，前端用它实时显示「当前多大」——
+	// 每次刷新就能跟着涨，不用再单独请求一次来源列表（那会跑 systemctl show）。
+	Size    int64  `json:"size,omitempty"`
+	ModTime string `json:"mtime,omitempty"`
 }
 
 // Options 是读取参数。
@@ -105,6 +115,8 @@ func Sources(dataDir string) ([]Source, error) {
 		if s.Kind == "file" {
 			if st, err := os.Stat(item.file); err == nil && !st.IsDir() {
 				s.Present = true
+				s.Size = st.Size()
+				s.ModTime = st.ModTime().UTC().Format(time.RFC3339)
 			}
 		} else {
 			s.Present = hasJournalctl()
@@ -148,6 +160,10 @@ func Read(source string, opt Options) (*Result, error) {
 		}
 		res := &Result{Source: item.src.Key, Label: item.src.Label, Lines: []string{}}
 		if item.src.Kind == "file" {
+			if st, err := os.Stat(item.file); err == nil && !st.IsDir() {
+				res.Size = st.Size()
+				res.ModTime = st.ModTime().UTC().Format(time.RFC3339)
+			}
 			lines, more, err := tailFile(item.file, opt.Lines)
 			if err != nil {
 				return nil, err
@@ -338,6 +354,132 @@ func clip(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// ---------- 清理 ----------
+
+// CleanResult 是一次清理的结果。
+type CleanResult struct {
+	Source string `json:"source"`
+	Kind   string `json:"kind"`
+	Before int64  `json:"before"`
+	After  int64  `json:"after"`
+	Freed  int64  `json:"freed"`
+	Note   string `json:"note"`
+}
+
+// minJournalKeep 是 journald 回收的下限。再往下压会连当次会话的记录一起删掉，
+// 出问题时反而无从下手；50MB 上下的日志对 960MB 的机器也不算负担。
+const minJournalKeep = 8 << 20
+
+// Clean 清理指定来源。
+//
+// 文件来源就地截断成 0 字节：nginx 与面板都还拿着这个 inode 在写，
+// 删文件之后它们会往一个谁也没法再打开的幽灵文件里写，日志从此消失。
+//
+// journal 来源交给 journald 自己回收（--vacuum-size），target 单位字节，
+// 只对 journal 有效，<=0 时取 50MB。
+func Clean(source string, opt Options, target int64) (*CleanResult, error) {
+	for _, item := range catalog(opt.DataDir) {
+		if item.src.Key != source {
+			continue
+		}
+		res := &CleanResult{Source: item.src.Key, Kind: item.src.Kind}
+		if item.src.Kind == "file" {
+			st, err := os.Stat(item.file)
+			if err != nil {
+				return nil, errors.New("日志文件不存在：" + item.file)
+			}
+			if st.IsDir() {
+				return nil, errors.New("来源路径是目录，拒绝清理")
+			}
+			res.Before = st.Size()
+			if err := os.Truncate(item.file, 0); err != nil {
+				return nil, errors.New("清空失败：" + err.Error())
+			}
+			res.Freed = res.Before
+			if res.Before == 0 {
+				res.Note = "文件本来就是空的"
+			} else {
+				res.Note = "已清空，文件保留（写入方不用重启）"
+			}
+			return res, nil
+		}
+
+		if !hasJournalctl() {
+			return nil, errors.New("当前系统没有 journalctl，无法清理该来源")
+		}
+		if target <= 0 {
+			target = 50 << 20
+		}
+		if target < minJournalKeep {
+			target = minJournalKeep
+		}
+		res.Before = JournalUsage()
+		out, err := vacuumJournal(target)
+		if err != nil {
+			return nil, err
+		}
+		res.After = JournalUsage()
+		if res.Before > res.After {
+			res.Freed = res.Before - res.After
+		}
+		res.Note = "journald 已回收到 " + mbText(res.After) +
+			"，只保留最近的部分；当前活动文件要先轮转才参与回收"
+		if out != "" {
+			res.Note += "。journalctl：" + out
+		}
+		return res, nil
+	}
+	return nil, ErrUnknownSource
+}
+
+// JournalUsage 统计 journald 落盘占用的字节数。
+//
+// 不用 `journalctl --disk-usage`：它输出的是给人看的一句话（"take up 47.3M"），
+// 带本地化，解析起来比遍历目录脆得多。/var/log/journal 是持久化目录，
+// /run/log/journal 是 Storage=volatile 时的目录，两个都算。
+func JournalUsage() int64 {
+	var total int64
+	for _, root := range []string{"/var/log/journal", "/run/log/journal"} {
+		_ = filepath.WalkDir(root, func(_ string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			if info, err := d.Info(); err == nil && info.Mode().IsRegular() {
+				total += info.Size()
+			}
+			return nil
+		})
+	}
+	return total
+}
+
+// vacuumJournal 把 journald 压到 target 字节以下。
+func vacuumJournal(target int64) (string, error) {
+	// 先轮转：正在写的活动文件不参与回收，不轮转基本等于什么都没做。
+	// 部分容器里没有权限轮转，这里失败不算错，后面的 vacuum 照样能删归档段。
+	_ = exec.Command("journalctl", "--rotate").Run()
+
+	sizeArg := fmt.Sprintf("--vacuum-size=%dM", (target+(1<<20)-1)>>20)
+	out, err := exec.Command("journalctl", sizeArg).CombinedOutput()
+	text := strings.TrimSpace(string(out))
+	if err != nil {
+		msg := text
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", errors.New("journalctl 回收失败：" + clip(msg, 200))
+	}
+	// 输出是若干行统计（Vacuuming done, freed …），只留最后一行当提示。
+	if i := strings.LastIndexByte(text, '\n'); i >= 0 {
+		text = text[i+1:]
+	}
+	return clip(text, 160), nil
+}
+
+func mbText(n int64) string {
+	return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
 }
 
 // DefaultNginxLogDir 便于前端提示日志位置。
