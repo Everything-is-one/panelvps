@@ -35,6 +35,17 @@ MemoryMax=256M
 # 内核参数与模块、cgroup —— 这些才是挡提权与横向移动的地方。
 ProtectSystem=full
 ReadWritePaths=-/etc -/usr -/var
+# 再点名软件商店实际落地的目录。
+#
+# 两个真实原因让「-/usr 放开」不等于「/usr/local/bin 可写」：
+#   1. 单元是旧版本（Web 升级只换二进制，不动 /etc/systemd/system），
+#      老单元的零散白名单里没有 /usr/local/bin；
+#   2. ReadWritePaths 的 bind 挂载不覆盖更内层的独立挂载点，而 systemd
+#      对**不存在**的路径是静默跳过的 —— /usr/local 若从宿主机 bind 进来，
+#      /usr 整体放开也写不进去。
+# 点名写一遍成本为零，装 Xray 时 mkdir /usr/local/bin 就不会再报
+# read-only file system。install.sh 会在启动前把这些目录建好。
+ReadWritePaths=-/usr/local/bin -/usr/local/share -/usr/local/etc -/etc/systemd/system -/etc/xray
 # /home 与 /root 必须可写：站点、备份、用户目录都在这里。
 # /tmp 与系统共用：PrivateTmp 会让文件管理器看到的 /tmp 和 SSH 里不是同一个目录，
 # 用户上传完再登录找不到文件，这是纯粹的困惑源。

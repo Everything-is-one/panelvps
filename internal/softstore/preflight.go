@@ -27,11 +27,12 @@ func preflight(plan []Action, log func(string)) error {
 	log("检查安装目录：" + strings.Join(targets, "、"))
 	for _, dir := range targets {
 		if err := ensureWritable(dir); err != nil {
-			return fmt.Errorf("目录 %s 不可写（%v）；面板以 systemd 沙箱运行，/usr、/etc 默认只读，"+
-				"只放行 ReadWritePaths 白名单，而白名单里不存在的路径会被 systemd 静默跳过。"+
-				"请在 SSH 或商家控制台执行：mkdir -p %s && systemctl restart panelvps"+
-				"（不要用面板自带的 Web 终端——它是面板的子进程，继承同样的只读视图），"+
-				"或在「设置 → 服务单元」里用内置版本覆盖后重启面板", dir, err, dir)
+			return fmt.Errorf("目录 %s 不可写（%v）。原因通常是这两条之一："+
+				"① 服务单元还是旧版本，没放开该目录——到「设置 → 服务单元」用内置版本覆盖后重启面板；"+
+				"② 目录在面板启动时不存在，systemd 会静默跳过 ReadWritePaths 里的路径——"+
+				"在 SSH 或商家控制台执行 mkdir -p %s 再 systemctl restart panelvps。"+
+				"（别用面板自带的 Web 终端：它是面板的子进程，继承同样的只读视图。）",
+				dir, err, dir)
 		}
 	}
 	return nil

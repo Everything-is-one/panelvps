@@ -159,8 +159,11 @@ env_report() {
 
     echo "  systemd 沙箱："
     if [[ -f "$UNIT" ]]; then
-        if grep -q "ReadWritePaths=.*-/usr" "$UNIT"; then
-            ok "单元已放开 /usr /etc /var（/boot 仍只读）"
+        if grep -q "ReadWritePaths=.*-/usr" "$UNIT" && grep -q -- "-/usr/local/bin" "$UNIT"; then
+            ok "单元已放开 /usr /etc /var 与软件商店目录（/boot 仍只读）"
+        elif grep -q "ReadWritePaths=.*-/usr" "$UNIT"; then
+            warn "单元放开了 /usr，但没点名 /usr/local/bin —— 装 Xray 仍可能报 read-only。"
+            warn "重跑安装脚本，或到「设置 → 服务单元」用内置版本覆盖后重启面板。"
         elif grep -q "/usr/local/share/xray" "$UNIT"; then
             warn "单元还是旧的零散白名单：路径不存在时 systemd 会静默跳过，"
             warn "软件商店会报 read-only file system。重跑安装脚本，或："
@@ -325,6 +328,10 @@ if [[ "$PUBLIC" -eq 1 ]]; then
 fi
 
 info "安装 systemd 单元"
+# 先把单元里 ReadWritePaths 点名的目录建出来。
+# systemd 对不存在的路径是静默跳过的：目录没建，bind 挂载就不会发生，
+# 面板再往里写就是 read-only —— 软件商店装 Xray 撞过这面墙。
+mkdir -p /usr/local/bin /usr/local/share /etc/xray
 install -m 0644 "$(dirname "$0")/panelvps.service" "$UNIT"
 
 if [[ -f "$(dirname "$0")/panelvps-sysctl.service" ]]; then
