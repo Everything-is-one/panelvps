@@ -48,11 +48,25 @@ func (s *Server) handleFirewallStatus(w http.ResponseWriter, r *http.Request) {
 			status.Whitelist = true
 		}
 	}
+
+	// pending_adopt：若此刻切到「默认拒绝」，会自动放行哪些在监端口。
+	// 前端用它把「点了会发生什么」提前列出来 —— 不给预览，用户不敢点；
+	// 点了才发现业务端口被自动加上，又说不出所以然。
+	var pending []string
+	if !status.Whitelist {
+		if ports, err := sysinfo.ListeningPorts(); err == nil {
+			for _, a := range planWhitelistAdds(rules, ports) {
+				pending = append(pending, a.Port+"/"+a.Proto)
+			}
+		}
+	}
+
 	ok(w, map[string]any{
-		"status":       status,
-		"rules":        rules,
-		"ssh_ports":    s.cfg.SSHPorts,
-		"persist_path": firewall.PersistPath(),
+		"status":        status,
+		"rules":         rules,
+		"ssh_ports":     s.cfg.SSHPorts,
+		"persist_path":  firewall.PersistPath(),
+		"pending_adopt": pending,
 	})
 }
 

@@ -288,6 +288,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/firewall/rules", s.requireAuth(s.handleFirewallCreate))
 	s.mux.HandleFunc("DELETE /api/v1/firewall/rules/{id}", s.requireAuth(s.handleFirewallDelete))
 	s.mux.HandleFunc("POST /api/v1/firewall/apply", s.requireAuth(s.handleFirewallApply))
+	s.mux.HandleFunc("POST /api/v1/firewall/mode", s.requireAuth(s.handleFirewallMode))
 	s.mux.HandleFunc("POST /api/v1/firewall/bans", s.requireAuth(s.handleBanCreate))
 	s.mux.HandleFunc("DELETE /api/v1/firewall/bans/{ip}", s.requireAuth(s.handleBanDelete))
 	s.mux.HandleFunc("GET /api/v1/security/ssh", s.requireAuth(s.handleSSHReport))

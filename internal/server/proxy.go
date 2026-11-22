@@ -187,6 +187,14 @@ func (s *Server) handleCreateInbound(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warn("创建默认用户失败", "inbound", in.Tag, "err", cerr)
 	}
 
+	// 端口放行：白名单模式下没有这条规则，节点建好了也连不上。
+	// 只听 127.0.0.1 的入站不对外，不用放行。
+	if !isLoopbackBind(in.Listen) {
+		if _, ferr := s.ensurePortAllowed(r.Context(), in.Port, "tcp", autoPortMark+"入站 "+in.Tag); ferr != nil {
+			s.logger.Warn("放行入站端口失败", "port", in.Port, "err", ferr)
+		}
+	}
+
 	s.audit(r, "inbound_create", in.Tag, fmt.Sprintf("%s:%d/%s", in.Listen, in.Port, in.Protocol))
 	apply := s.applyXray(r.Context())
 	s.logger.Info("创建入站", "tag", in.Tag, "port", in.Port, "protocol", in.Protocol)
@@ -246,6 +254,18 @@ func (s *Server) handleUpdateInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "inbound_update", next.Tag, fmt.Sprintf("port=%d", next.Port))
+
+	// 换了端口就把旧的自动规则收回去，避免删掉的端口一直对外开着。
+	if cur.Port != next.Port {
+		if err := s.releasePort(r.Context(), cur.Port, "入站"); err != nil {
+			s.logger.Warn("回收旧入站端口规则失败", "port", cur.Port, "err", err)
+		}
+	}
+	if !isLoopbackBind(next.Listen) {
+		if _, ferr := s.ensurePortAllowed(r.Context(), next.Port, "tcp", autoPortMark+"入站 "+next.Tag); ferr != nil {
+			s.logger.Warn("放行入站端口失败", "port", next.Port, "err", ferr)
+		}
+	}
 	ok(w, map[string]any{"apply": s.applyXray(r.Context())})
 }
 
@@ -265,6 +285,9 @@ func (s *Server) handleDeleteInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "inbound_delete", in.Tag, fmt.Sprintf("port=%d", in.Port))
+	if err := s.releasePort(r.Context(), in.Port, "入站"); err != nil {
+		s.logger.Warn("回收入站端口规则失败", "port", in.Port, "err", err)
+	}
 	ok(w, map[string]any{"apply": s.applyXray(r.Context())})
 }
 

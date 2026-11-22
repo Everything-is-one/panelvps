@@ -73,8 +73,41 @@ func (s *Server) handleRelayCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "relay_create", rule.Name, fmt.Sprintf("%s -> %s", relayAddr(rule), rule.Target))
+	s.allowRelayPorts(r.Context(), rule)
 	s.reloadRelays(r.Context())
 	ok(w, map[string]any{"id": id})
+}
+
+// allowRelayPorts 给中转的监听端口补防火墙放行。
+//
+// network 是 tcp / udp / both，both 要各来一条。白名单模式下少了这些
+// 规则，转发规则建好了却一个包都进不来，现象和「中转不生效」一模一样。
+func (s *Server) allowRelayPorts(ctx context.Context, r *store.Relay) {
+	if isLoopbackBind(r.Listen) {
+		return
+	}
+	for _, p := range relayProtos(r.Network) {
+		if _, err := s.ensurePortAllowed(ctx, r.ListenPort, p, autoPortMark+"中转 "+r.Name); err != nil {
+			s.logger.Warn("放行中转端口失败", "port", r.ListenPort, "proto", p, "err", err)
+		}
+	}
+}
+
+// releaseRelayPorts 回收中转的自动放行规则。
+func (s *Server) releaseRelayPorts(ctx context.Context, r *store.Relay) {
+	if err := s.releasePort(ctx, r.ListenPort, "中转"); err != nil {
+		s.logger.Warn("回收中转端口规则失败", "port", r.ListenPort, "err", err)
+	}
+}
+
+func relayProtos(network string) []string {
+	switch network {
+	case "udp":
+		return []string{"udp"}
+	case "both":
+		return []string{"tcp", "udp"}
+	}
+	return []string{"tcp"}
 }
 
 func (s *Server) handleRelayUpdate(w http.ResponseWriter, r *http.Request) {
@@ -104,6 +137,10 @@ func (s *Server) handleRelayUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "relay_update", next.Name, fmt.Sprintf("%s -> %s", relayAddr(next), next.Target))
+	if cur.ListenPort != next.ListenPort || cur.Network != next.Network {
+		s.releaseRelayPorts(r.Context(), cur)
+	}
+	s.allowRelayPorts(r.Context(), next)
 	s.reloadRelays(r.Context())
 	ok(w, map[string]any{"id": id})
 }
@@ -124,6 +161,7 @@ func (s *Server) handleRelayDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "relay_delete", cur.Name, relayAddr(cur))
+	s.releaseRelayPorts(r.Context(), cur)
 	s.reloadRelays(r.Context())
 	ok(w, nil)
 }

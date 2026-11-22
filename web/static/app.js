@@ -2730,18 +2730,63 @@ function renderSecurityView(root) {
       const data = await api("GET", "/api/v1/firewall");
       const st = data.status;
       const permCount = (st.bans || []).filter((b) => b.permanent).length;
-      statusBox.replaceChildren(
+      const pending = data.pending_adopt || [];
+
+      // 切换默认策略。两种模式的差别对非运维用户几乎不可见（界面都只是
+      // 一张规则列表），所以确认框必须把「点了以后哪些端口会通、哪些会断」
+      // 讲清楚，而不是只问一句要不要切。
+      const toggleMode = async () => {
+        const toWL = !st.whitelist;
+        const detail = toWL
+          ? (pending.length
+              ? "未列出的端口将被拒绝。下列在监端口会自动放行：\n  " + pending.join("、")
+              : "未列出的端口将被拒绝。当前没有检测到需要对外的在监端口。")
+          : "所有端口恢复可连通，规则只用来拦特定来源。";
+        if (!confirm((toWL ? "切换为「默认拒绝」？" : "切回「默认放行」？") + "\n\n" + detail +
+          "\n\nSSH 与面板端口始终强制放行，不会把你锁在外面。")) return;
+        try {
+          const r = await api("POST", "/api/v1/firewall/mode", { mode: toWL ? "whitelist" : "blacklist" });
+          msg.className = "msg ok";
+          msg.textContent = toWL
+            ? "已切换为默认拒绝" + (r.adopted && r.adopted.length ? "，自动放行 " + r.adopted.length + " 个在监端口" : "")
+            : "已切回默认放行";
+          load();
+        } catch (e) {
+          msg.className = "msg err";
+          msg.textContent = e.message;
+        }
+      };
+
+      const kids = [
         el("div", { class: "grid stat-grid" }, [
           statCard("后端", st.backend === "nft" ? "nftables" : st.backend === "iptables" ? "iptables-legacy" : "不可用",
             st.supported ? "已就绪" : (st.reason || "")),
-          statCard("模式", st.whitelist ? "白名单" : "黑名单",
-            st.whitelist ? "默认拒绝，仅放行已添加规则" : "默认放行，只拦已添加规则"),
+          statCard("模式", st.whitelist ? "默认拒绝" : "默认放行",
+            st.whitelist ? "白名单：除已放行的端口外一律拒绝" : "黑名单：所有端口都能连，规则只用来拦"),
           statCard("SSH 端口", (data.ssh_ports || []).join(", "), "始终优先放行"),
           statCard("封禁数", String((st.bans || []).length),
             permCount ? "其中永久 " + permCount + " 条" : "到期自动解除"),
         ]),
-        el("div", { class: "hint mono", text: "持久化文件：" + (data.persist_path || "-") }),
-      );
+      ];
+
+      if (!st.whitelist) {
+        kids.push(el("div", { class: "banner", style: "margin-top:12px" }, [
+          el("div", {}, [
+            el("strong", { text: "当前是「默认放行」：" }),
+            el("span", { text: "规则列表里没有的端口本来就能连通，防火墙只负责拦你显式加进去的 IP 或端口。" }),
+          ]),
+          el("div", { style: "margin-top:6px", text: "如果你以为它在挡所有未放行的端口，需要切到「默认拒绝」——建议先看下面会放行哪些端口再决定。" }),
+        ]));
+      }
+
+      kids.push(el("div", { class: "actions", style: "margin-top:14px" }, [
+        el("button", { class: st.whitelist ? "ghost" : "", text: st.whitelist ? "切回默认放行" : "切换为默认拒绝", onclick: toggleMode }),
+        el("span", { class: "hint", text: st.whitelist
+          ? "切换会把链尾策略改回 accept，已放行的规则保留。"
+          : "切换会把链尾策略改为 drop，并自动放行当前对外监听的端口。" }),
+      ]));
+      kids.push(el("div", { class: "hint mono", text: "持久化文件：" + (data.persist_path || "-") }));
+      statusBox.replaceChildren(...kids);
 
       const rows = (data.rules || []).map((r) => {
         const del = el("button", { class: "link danger", text: "删除", onclick: async () => {
