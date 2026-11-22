@@ -488,18 +488,29 @@ func runAction(ctx context.Context, a Action, log func(string)) error {
 }
 
 func runCmd(ctx context.Context, log func(string), name string, args ...string) error {
+	_, err := runCmdCapture(ctx, log, name, args...)
+	return err
+}
+
+// runCmdCapture 与 runCmd 相同，但把输出也交回调用方。
+//
+// 有些失败必须看原文才能归类：「Unit not loaded」是幂等的，「Read-only
+// file system」是沙箱问题，两者都只体现在 stderr 里，而 exec 返回的
+// *ExitError 只剩 "exit status 5/100"。日志里虽然有，但代码拿不到。
+func runCmdCapture(ctx context.Context, log func(string), name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive", "LC_ALL=C.UTF-8")
 	out, err := cmd.CombinedOutput()
-	if len(out) > 0 {
-		for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+	text := strings.TrimRight(string(out), "\n")
+	if text != "" {
+		for _, line := range strings.Split(text, "\n") {
 			if len(line) > 400 {
 				line = line[:400] + "…"
 			}
 			log("  " + line)
 		}
 	}
-	return err
+	return text, err
 }
 
 // aptArgs 拼出 apt-get 的参数。
@@ -521,11 +532,55 @@ func aptArgs(a AptAction) []string {
 
 func runApt(ctx context.Context, a AptAction, log func(string)) error {
 	if a.Update {
-		if err := runCmd(ctx, log, "apt-get", "update", "-q"); err != nil {
+		if _, err := runCmdCapture(ctx, log, "apt-get", "update", "-q"); err != nil {
 			return fmt.Errorf("apt-get update 失败: %w", err)
 		}
 	}
-	return runCmd(ctx, log, "apt-get", aptArgs(a)...)
+	out, err := runCmdCapture(ctx, log, "apt-get", aptArgs(a)...)
+	if err != nil {
+		return aptError(out, err)
+	}
+	return nil
+}
+
+// aptError 把 apt 的高噪输出压成一句能直接照做的话。
+//
+// 起因：装 Nginx 时 dpkg 在 unpack 阶段报
+//
+//	unable to clean up mess surrounding './etc/default/nginx':
+//	Read-only file system
+//
+// 面板只把原文刷进日志，最后给用户的是「apt install nginx 失败: exit
+// status 100」。原文里其实写着根因，但埋在四十行 dpkg 进度条中间，
+// 用户看到的仍是「apt 装不上」。
+func aptError(out string, err error) error {
+	switch {
+	case strings.Contains(out, "Read-only file system"):
+		return fmt.Errorf("apt 写不进系统目录: %w。"+
+			"dpkg 装包要同时写 /usr（程序）、/etc（配置）、/var（包数据库），"+
+			"这三个目录是否可写由服务单元的 ProtectSystem / ReadWritePaths 决定。"+
+			"当前单元的沙箱比本版本严格（0.4.3 之前装的老单元是 strict，或白名单漏了 /etc /usr /var）。"+
+			"修复：设置 → 服务单元 → 用内置版本覆盖，然后重启面板；"+
+			"或在 SSH 里执行 install -m644 deploy/panelvps.service /etc/systemd/system/panelvps.service "+
+			"&& systemctl daemon-reload && systemctl restart panelvps。"+
+			"注意这次 dpkg 已经留下半装状态，修好沙箱后要先跑一次 apt-get -f install 收尾。", err)
+
+	case strings.Contains(out, "Could not get lock") || strings.Contains(out, "Unable to acquire the dpkg frontend lock"):
+		return fmt.Errorf("另一个 apt / dpkg 正在运行: %w。"+
+			"等它结束后重试；不确定是谁在跑就看 ps aux | grep -E 'apt|dpkg'。", err)
+
+	case strings.Contains(out, "dpkg was interrupted") || strings.Contains(out, "--configure -a"):
+		return fmt.Errorf("dpkg 处于半装状态: %w。"+
+			"先执行 apt-get -f install 或 dpkg --configure -a 收尾，再装这个软件。", err)
+
+	case strings.Contains(out, "Temporary failure resolving") || strings.Contains(out, "Could not resolve"):
+		return fmt.Errorf("软件源域名解析失败: %w。"+
+			"检查 /etc/resolv.conf，或在 网络 → DNS 里换一个可用的解析服务器。", err)
+
+	case strings.Contains(out, "No space left on device"):
+		return fmt.Errorf("磁盘写满: %w。清理 /var/cache/apt 或扩容后再试。", err)
+	}
+	return fmt.Errorf("apt 执行失败: %w", err)
 }
 
 func runDownload(ctx context.Context, a DownloadAction, log func(string)) error {
@@ -808,7 +863,16 @@ func runService(a ServiceAction, log func(string)) error {
 			log("  服务 " + a.Name + " 尚未安装，跳过 " + s.verb)
 			continue
 		}
-		if err := runCmd(context.Background(), log, "systemctl", s.verb, a.Name); err != nil {
+		out, err := runCmdCapture(context.Background(), log, "systemctl", s.verb, a.Name)
+		if err != nil {
+			// 光问磁盘不够：dpkg 半装时单元文件可能已经落地、却没来得及
+			// daemon-reload，systemd 自己并不认识它 —— list-unit-files 看得见，
+			// stop 却返回 exit 5 与 "Unit nginx.service not loaded"。
+			// 这种情形同样是幂等的，不能算回滚失败。
+			if (s.verb == "stop" || s.verb == "disable") && unitNotLoaded(out) {
+				log("  服务 " + a.Name + " 未加载，跳过 " + s.verb)
+				continue
+			}
 			if a.IgnoreError {
 				log("  跳过 systemctl " + s.verb + " " + a.Name)
 				continue
@@ -834,6 +898,26 @@ func unitExists(name string) bool {
 		return true
 	}
 	return strings.TrimSpace(string(out)) != ""
+}
+
+// unitNotLoaded 判断 systemctl 的报错属于「这个单元本来就不存在」。
+//
+// exit code 5 是 systemctl 的 "unit not loaded"，此外还有几种措辞。
+// 只对 stop / disable 生效：对 start 而言「不存在」是真错误。
+func unitNotLoaded(out string) bool {
+	s := strings.ToLower(out)
+	for _, pat := range []string{
+		"not loaded",
+		"not found",
+		"could not be found",
+		"does not exist",
+		"no such file",
+	} {
+		if strings.Contains(s, pat) {
+			return true
+		}
+	}
+	return false
 }
 
 func runCheck(ctx context.Context, a CheckAction, log func(string)) error {

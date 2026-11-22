@@ -24,18 +24,30 @@ func preflight(plan []Action, log func(string)) error {
 	if len(targets) == 0 {
 		return nil
 	}
-	log("检查安装目录：" + strings.Join(targets, "、"))
+	log("检查" + preflightLabel(plan) + "：" + strings.Join(targets, "、"))
 	for _, dir := range targets {
 		if err := ensureWritable(dir); err != nil {
-			return fmt.Errorf("目录 %s 不可写（%v）。原因通常是这两条之一："+
-				"① 服务单元还是旧版本，没放开该目录——到「设置 → 服务单元」用内置版本覆盖后重启面板；"+
-				"② 目录在面板启动时不存在，systemd 会静默跳过 ReadWritePaths 里的路径——"+
-				"在 SSH 或商家控制台执行 mkdir -p %s 再 systemctl restart panelvps。"+
+			return fmt.Errorf("%s 不可写（%v）。这是服务单元的沙箱挡住了，不是软件包的问题："+
+				"① 单元是 0.4 之前装的（ProtectSystem=strict，整机只读），"+
+				"或白名单没放开该目录——到「设置 → 服务单元」用内置版本覆盖后重启面板；"+
+				"② 旧单元靠 ReadWritePaths 白名单开洞，而 systemd 对其中**不存在**的路径"+
+				"静默跳过——先在 SSH 里 mkdir -p %s 再 systemctl restart panelvps。"+
 				"（别用面板自带的 Web 终端：它是面板的子进程，继承同样的只读视图。）",
 				dir, err, dir)
 		}
 	}
 	return nil
+}
+
+// preflightLabel 让日志说实话：apt 探的是三个系统根目录，
+// 写成「安装目录」会让人以为面板要把东西装进 /etc。
+func preflightLabel(plan []Action) string {
+	for _, a := range plan {
+		if a.Apt != nil {
+			return "系统目录（dpkg 需要写 /usr /etc /var）"
+		}
+	}
+	return "安装目录"
 }
 
 // planTargets 列出计划会写入的目录，去重并保持出现顺序。
@@ -55,6 +67,17 @@ func planTargets(plan []Action) []string {
 	}
 	for _, a := range plan {
 		switch {
+		case a.Apt != nil:
+			// 装包（含 purge）是唯一不经过 Download / Path 的动作，
+			// 也是最容易撞沙箱的一个：dpkg 一次要写三处 ——
+			//   /usr  程序、文档、systemd 单元
+			//   /etc  默认配置（nginx-common 就落在 /etc/default/nginx）
+			//   /var  包数据库 /var/lib/dpkg、下载缓存 /var/cache/apt
+			// 这三个根探一遍就够了，不必细化到子目录：沙箱是按挂载点
+			// remount 的，根可写则整棵可写。
+			add("/etc")
+			add("/usr")
+			add("/var")
 		case a.Download != nil:
 			add(path.Dir(a.Download.Dest))
 		case a.Extract != nil:

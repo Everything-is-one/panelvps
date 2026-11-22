@@ -1,6 +1,7 @@
 package softstore
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -161,5 +162,84 @@ func TestPlanLines(t *testing.T) {
 	un := PlanLines(m, "uninstall")
 	if len(un) == 0 {
 		t.Fatal("卸载计划不应为空")
+	}
+}
+
+// 装 Nginx 那次失败暴露的洞：preflight 只探 download / path / write_file
+// 的落点，纯 apt 清单一个目标都没有，于是「系统目录只读」在预检阶段
+// 完全没被看见，一路走到 dpkg unpack 才炸。
+func TestPlanTargetsCoversAptSystemDirs(t *testing.T) {
+	plan := []Action{{Apt: &AptAction{Names: []string{"nginx"}}}}
+	got := planTargets(plan)
+	want := map[string]bool{"/etc": false, "/usr": false, "/var": false}
+	for _, p := range got {
+		if _, ok := want[p]; ok {
+			want[p] = true
+		}
+	}
+	for dir, found := range want {
+		if !found {
+			t.Errorf("apt 计划没有探 %s，装包撞只读沙箱时预检会放行：%v", dir, got)
+		}
+	}
+}
+
+// 预检的日志措辞：apt 的目标是三个系统根目录，说成「安装目录」会误导。
+func TestPreflightLabel(t *testing.T) {
+	aptPlan := []Action{{Apt: &AptAction{Names: []string{"nginx"}}}}
+	if got := preflightLabel(aptPlan); !strings.Contains(got, "系统目录") {
+		t.Errorf("apt 计划应标注为系统目录，得到 %q", got)
+	}
+	dlPlan := []Action{{Download: &DownloadAction{URL: "https://example.com/a.tgz", Dest: "/usr/local/bin/a"}}}
+	if got := preflightLabel(dlPlan); got != "安装目录" {
+		t.Errorf("下载计划应标注为安装目录，得到 %q", got)
+	}
+}
+
+// systemctl 对「单元根本没加载」的几种措辞都要认出来。
+func TestUnitNotLoaded(t *testing.T) {
+	yes := []string{
+		"Failed to stop nginx.service: Unit nginx.service not loaded.",
+		"Failed to disable unit: Unit file nginx.service does not exist.",
+		"Unit nginx.service could not be found.",
+	}
+	for _, s := range yes {
+		if !unitNotLoaded(s) {
+			t.Errorf("应判定为未加载：%q", s)
+		}
+	}
+	no := []string{
+		"Job for nginx.service failed because the control process exited with error code.",
+		"",
+	}
+	for _, s := range no {
+		if unitNotLoaded(s) {
+			t.Errorf("不应判定为未加载：%q", s)
+		}
+	}
+}
+
+// 只读沙箱的错误必须自带修法，否则用户只看到 "exit status 100"。
+func TestAptErrorReadOnlyIsActionable(t *testing.T) {
+	out := "dpkg: error processing archive ...\n" +
+		"unable to clean up mess surrounding './etc/default/nginx' before installing another version: " +
+		"Read-only file system\nE: Sub-process /usr/bin/dpkg returned an error code (1)"
+	err := aptError(out, errors.New("exit status 100"))
+	if err == nil {
+		t.Fatal("应返回错误")
+	}
+	msg := err.Error()
+	for _, want := range []string{"服务单元", "/etc", "/usr", "/var", "apt-get -f install"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("提示缺少 %q：%s", want, msg)
+		}
+	}
+}
+
+// 未命中任何已知模式时，不能把原文吞掉。
+func TestAptErrorKeepsUnknownOutput(t *testing.T) {
+	err := aptError("E: something odd", errors.New("exit status 100"))
+	if err == nil || !strings.Contains(err.Error(), "exit status 100") {
+		t.Fatalf("未知错误应保留原始错误：%v", err)
 	}
 }
