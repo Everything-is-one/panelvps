@@ -233,6 +233,9 @@ function statCard(key, value, desc, percent, topKind) {
 // fixed 而不是 absolute，卡片所在容器有 overflow 时会把它裁掉。
 const TOP_LABEL = { cpu: "CPU 占用", mem: "内存占用", disk: "磁盘占用" };
 const topCache = new Map();
+// 最近一次的资源快照。内存浮层要用它把「实际占用」拆开讲，
+// 而排行接口只回进程列表，构成部分来自 /system/stat。
+let memSnap = null;
 let topTipEl = null;
 let topShowTimer = null;
 let topHideTimer = null;
@@ -339,24 +342,103 @@ async function diskTipLoop(tip, seq, card) {
 }
 
 function topTipBody(kind, data) {
+  if (kind === "mem") return memTipBody(data);
   const items = data.items || [];
   if (!data.supported || !items.length) {
     return [el("div", { class: "top-empty", text: data.reason || "暂无可展示的数据" })];
   }
   let max = 1;
   for (const it of items) {
-    const v = kind === "cpu" ? it.cpu_pct : it.rss;
+    const v = it.cpu_pct;
     if (v > max) max = v;
   }
-  const rows = items.map((it) => {
-    if (kind === "mem") {
-      return topTipRow(it.name, fmtBytes(it.rss), (it.rss / max) * 100,
-        "PID " + it.pid + " · 占内存 " + (it.mem_pct || 0).toFixed(1) + "%");
-    }
-    return topTipRow(it.name, (it.cpu_pct || 0).toFixed(1) + "%", (it.cpu_pct / max) * 100,
-      "PID " + it.pid + " · 内存 " + fmtBytes(it.rss));
+  return items.map((it) => topTipRow(it.name, (it.cpu_pct || 0).toFixed(1) + "%", (it.cpu_pct / max) * 100,
+    "PID " + it.pid + " · 内存 " + fmtBytes(it.rss)));
+}
+
+// 内存构成：把「实际占用」再往下拆一层。
+//
+// 起因是一个必然会问的问题：卡片写「实际 313 MB」，往下看前 5 名进程只有
+// 133 MB，剩下的 180 MB 去哪了？答案分散在三个地方——另外几十个小进程、
+// 内核自己（slab / 页表 / 内核栈）、tmpfs。它们都不属于「进程排行」，
+// 但不写出来，这个数就永远像凭空冒出来的。
+function memPartsBlock(p, used) {
+  // 颜色只用一个强调色 + 三档灰：面板的约束是单调色系，
+  // 四块彩色会把「实际占用」这个主次关系冲淡。
+  const parts = [
+    { key: "anon", name: "进程匿名", v: numv(p.anon), color: "var(--accent)",
+      hint: "堆、栈、Go heap：所有进程加总，不只前 5" },
+    { key: "shmem", name: "tmpfs / 共享内存", v: numv(p.shmem), color: "#8d9bb5",
+      hint: "没有 swap 时收不回来，所以算实际占用" },
+    { key: "kernel", name: "内核", v: numv(p.kernel), color: "#b9c1d0",
+      hint: "不可回收 slab、内核栈、页表" },
+    { key: "other", name: "其它", v: numv(p.other), color: "var(--cache)",
+      hint: "per-cpu、vmalloc、驱动缓冲等" },
+  ].filter((x) => x.v > 0);
+  if (!parts.length) return [];
+
+  const segs = parts.map((x) => {
+    const i = el("i");
+    i.style.width = Math.max(0.6, (x.v / used) * 100) + "%";
+    i.style.background = x.color;
+    i.title = x.name + " " + fmtBytes(x.v);
+    return i;
   });
-  return rows;
+
+  const rows = parts.map((x) => el("div", { class: "mp-row", title: x.hint }, [
+    el("span", { class: "mp-dot", style: "background:" + x.color }),
+    el("span", { class: "mp-name", text: x.name }),
+    el("span", { class: "mp-val", text: fmtBytes(x.v) }),
+    el("span", { class: "mp-share", text: pct(x.v, used) + "%" }),
+  ]));
+
+  return [
+    el("div", { class: "mp-head", text: "实际 " + fmtBytes(used) + " 的构成" }),
+    el("div", { class: "mp-bar" }, segs),
+    ...rows,
+  ];
+}
+
+function memTipBody(data) {
+  const nodes = [];
+  const used = numv(memSnap && memSnap.mem_used);
+  if (memSnap && memSnap.mem_parts && used > 0) {
+    nodes.push(...memPartsBlock(memSnap.mem_parts, used));
+  }
+
+  const items = data.items || [];
+  if (!data.supported || !items.length) {
+    nodes.push(el("div", { class: "top-empty", text: data.reason || "暂无可展示的数据" }));
+    return nodes;
+  }
+  if (nodes.length) {
+    nodes.push(el("div", { class: "mp-sep" }));
+    nodes.push(el("div", { class: "mp-head", text: "占用最多的 " + items.length + " 个进程" }));
+  }
+
+  let max = 1;
+  for (const it of items) {
+    if (it.rss > max) max = it.rss;
+  }
+  for (const it of items) {
+    nodes.push(topTipRow(it.name, fmtBytes(it.rss), (it.rss / max) * 100,
+      "PID " + it.pid + " · 占内存 " + (it.mem_pct || 0).toFixed(1) + "%"));
+  }
+
+  // 前 5 名之外的进程。不写这一行，「313 vs 133」就始终对不上账。
+  const sum = numv(data.proc_rss_sum);
+  const count = numv(data.proc_count);
+  if (count > items.length && sum > 0) {
+    let top = 0;
+    for (const it of items) top += numv(it.rss);
+    nodes.push(el("div", {
+      class: "top-foot",
+      text: "其余 " + (count - items.length) + " 个进程合计 " + fmtBytes(Math.max(0, sum - top)) + "（RSS 相加，含共享页）",
+    }));
+  } else {
+    nodes.push(el("div", { class: "top-foot", text: "RSS 会重复计算共享页，不应与上面的实际占用直接相减" }));
+  }
+  return nodes;
 }
 
 async function showTopTip(card, kind, label) {
@@ -364,9 +446,11 @@ async function showTopTip(card, kind, label) {
   const tip = topTip();
   const rect = card.getBoundingClientRect();
   const isDisk = kind === "disk";
+  // 内存浮层先讲「实际占用怎么来的」，再列进程，所以标题不能写「前 5」。
+  const title = isDisk ? "占空间最多的目录" : kind === "mem" ? "内存" : (TOP_LABEL[kind] || label) + "前 5";
   tip.replaceChildren(
     el("div", { class: "top-head" }, [
-      el("span", { class: "top-title", text: isDisk ? "占空间最多的目录" : (TOP_LABEL[kind] || label) + "前 5" }),
+      el("span", { class: "top-title", text: title }),
       el("span", { class: "top-stamp", text: isDisk ? "逐目录统计" : "近 5 秒" }),
     ]),
     el("div", { class: "top-body" }, [el("div", { class: "top-empty", text: isDisk ? "正在统计目录大小…" : "采样中…" })]),
@@ -974,6 +1058,7 @@ function renderOverviewView(root) {
       const data = await api("GET", "/api/v1/system/stat");
       if (!alive()) return;
       const s = data.metrics || {};
+      memSnap = s; // 内存浮层用它渲染「实际占用」的构成
       loaded = true;
       grid.replaceChildren(
         statCard("CPU", s.cpu_pct ? num(s.cpu_pct).toFixed(1) + "%" : "—",

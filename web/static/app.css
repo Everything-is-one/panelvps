@@ -831,6 +831,9 @@ table.files tr.row-up td { padding-top: 10px; padding-bottom: 10px; background: 
   border-radius: var(--radius-md); box-shadow: var(--shadow-lg);
   padding: 13px 15px 14px;
   pointer-events: auto;
+  /* 内存浮层现在还要讲构成，比「前 5 名」时代高一截。
+     矮屏上不给上限会超出视口，翻到上方也压不下。 */
+  max-height: calc(100vh - 24px); overflow-y: auto; overscroll-behavior: contain;
 }
 .top-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
 .top-title { font-size: 13.5px; font-weight: 600; color: var(--text-2); }
@@ -849,6 +852,34 @@ table.files tr.row-up td { padding-top: 10px; padding-bottom: 10px; background: 
 .top-track i { display: block; height: 100%; border-radius: 999px; background: var(--accent); }
 .top-sub { margin-top: 3px; font-size: 11.5px; color: var(--muted-2); font-variant-numeric: tabular-nums; }
 .top-empty { padding: 12px 0 6px; text-align: center; font-size: 13px; color: var(--muted); }
+
+/* 内存构成（实际占用再拆一层）
+ *
+ * 颜色只用强调色 + 三档灰，不引入第二种彩色：面板的视觉约束是单调色系，
+ * 这里要表达的是「哪一块占大头」，不是让四块并列抢注意力。
+ */
+.mp-head {
+  font-size: 11.5px; color: var(--muted); letter-spacing: .02em;
+  font-variant-numeric: tabular-nums;
+}
+.mp-bar {
+  display: flex; height: 6px; border-radius: 999px; overflow: hidden;
+  background: var(--surface-3); margin: 7px 0 9px;
+}
+.mp-bar > i { display: block; height: 100%; }
+.mp-bar > i + i { box-shadow: inset 1px 0 0 rgba(255, 255, 255, .75); }
+.mp-row {
+  display: flex; align-items: baseline; gap: 7px;
+  margin-top: 3px; font-size: 12.5px; color: var(--text-2);
+}
+.mp-dot {
+  width: 7px; height: 7px; border-radius: 999px; flex: 0 0 auto;
+  transform: translateY(-1px);
+}
+.mp-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mp-val { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.mp-share { width: 40px; text-align: right; color: var(--muted-2); font-variant-numeric: tabular-nums; }
+.mp-sep { height: 1px; background: var(--border); margin: 12px 0 9px; }
 
 /* ---------- 磁盘占用明细 ---------- */
 
