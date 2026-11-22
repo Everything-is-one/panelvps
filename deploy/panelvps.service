@@ -58,9 +58,18 @@ LockPersonality=yes
 # AF_NETLINK 必须保留：Web 终端里跑 ip / ss / systemctl 都依赖它，
 # 少了会出现「终端里 ip a 报 Protocol not supported」这种诡异现象。
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
-# 仅保留面板确实需要的能力：改防火墙、切用户、读任意文件
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN CAP_DAC_OVERRIDE CAP_KILL CAP_SETUID CAP_SETGID
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN CAP_DAC_OVERRIDE CAP_KILL CAP_SETUID CAP_SETGID
+# 仅保留面板确实需要的能力：改防火墙、切用户、读任意文件、改文件权限
+#
+# CAP_FOWNER 是 apt 带来的硬需求，少它会看到一串
+#   W: chmod 0600 of file /var/lib/apt/lists/partial/..._InRelease failed
+#      - Item::QueueURI (1: Operation not permitted)
+# 原因：apt 的 sandbox 用 _apt 用户下载，落到 lists/partial 的文件属主是
+# _apt；root 再去 chmod 时，对「不属于自己」的文件做权限修改需要
+# CAP_FOWNER（CAP_CHOWN 只管改属主，不管改权限位）。少了它 apt 只打
+# warning 不中断，所以容易被当成噪音忽略 —— 但同样的权限会被文件管理器
+# 改权限、站点部署 chown/chmod 用到，早晚会撞上。
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_KILL CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_KILL CAP_SETUID CAP_SETGID
 
 # 日志走 journald（PRD ADR-08）
 StandardOutput=journal

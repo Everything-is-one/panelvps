@@ -171,6 +171,16 @@ env_report() {
         else
             warn "单元的 ReadWritePaths 不是最新写法，装包/建站可能写不进系统目录"
         fi
+
+        # apt 的 sandbox 用 _apt 下载，root 对 _apt 名下的文件改权限要靠 FOWNER。
+        # 少了它不致命（apt 只打 warning），但文件管理器改权限、站点 chown 会失败。
+        if grep -q "CapabilityBoundingSet=.*CAP_FOWNER" "$UNIT"; then
+            ok "能力集含 CAP_FOWNER（apt 与改权限不会报 Operation not permitted）"
+        elif grep -q "CapabilityBoundingSet=" "$UNIT"; then
+            warn "单元的 CapabilityBoundingSet 没有 CAP_FOWNER："
+            warn "  apt 会打一串「chmod ... failed - Operation not permitted」warning，"
+            warn "  文件管理器改权限也会失败。重跑安装脚本，或到「设置 → 服务单元」覆盖后重启。"
+        fi
     else
         warn "未找到服务单元：$UNIT"
     fi
