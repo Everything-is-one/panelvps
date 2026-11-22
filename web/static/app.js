@@ -2504,6 +2504,8 @@ function renderTerminalView(root) {
   const panes = el("div");
   const empty = el("div", { class: "hint", style: "padding:26px;text-align:center", text: "还没有会话，点上面的「+ 新建标签」开一个" });
   const sessions = [];
+  // 让配色开关能改到已经建好的终端（applyLogTheme 遍历这个数组）
+  liveTerms = sessions;
   let seq = 0;
   let activeId = 0;
 
@@ -2665,14 +2667,8 @@ function renderTerminalView(root) {
       lineHeight: 1.3,
       scrollback: 5000,
       convertEol: false,
-      theme: {
-        background: "#0d1117", foreground: "#d1d7e0", cursor: "#7aa2f7", cursorAccent: "#0d1117",
-        selectionBackground: "rgba(122,162,247,.30)",
-        black: "#1b1f27", red: "#f7768e", green: "#9ece6a", yellow: "#e0af68",
-        blue: "#7aa2f7", magenta: "#bb9af7", cyan: "#7dcfff", white: "#c0caf5",
-        brightBlack: "#5a6478", brightRed: "#ff9aae", brightGreen: "#b9f27c", brightYellow: "#ffd68a",
-        brightBlue: "#9ab8ff", brightMagenta: "#d4b0ff", brightCyan: "#a4e4ff", brightWhite: "#ffffff",
-      },
+      // 配色跟日志框共用一个开关（见 applyLogTheme）
+      theme: TERM_THEME[logTheme()],
     });
     const fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
@@ -2723,7 +2719,7 @@ function renderTerminalView(root) {
       el("span", { class: "hint", text: "终端默认关闭，到「设置 → 基本设置」勾选「启用 Web 终端」即可生效，不用重启。" }),
       el("button", { class: "ghost", text: "去设置", onclick: () => renderApp("settings") }),
     ]),
-  ]));
+  ], [logThemeButton()]));
 
   syncTabBar();
   addTab();
@@ -2734,6 +2730,7 @@ function renderTerminalView(root) {
       try { if (s.ro) s.ro.disconnect(); } catch (_) { /* 忽略 */ }
       try { s.term.dispose(); } catch (_) { /* 忽略 */ }
     }
+    liveTerms = [];
   };
 }
 
@@ -3143,6 +3140,64 @@ function renderSecurityView(root) {
   loadRecords();
 }
 
+// ---------- 日志 / 终端配色 ----------
+//
+// 黑底是默认：长时间盯日志、看终端输出更省眼。但截图、投屏、打印的场合
+// 黑块很扎眼，所以给一个本地开关。只存在浏览器里（localStorage），不进配置——
+// 它纯属显示偏好，换台电脑看不出来是正常的。
+const LOG_THEME_KEY = "panelvps.logTheme";
+
+// 两套 xterm 调色板。浅色不是把深色反过来：ANSI 的绿/黄在白底上必须压暗，
+// 否则 `绿字 + 白底` 直接糊成一片。
+const TERM_THEME = {
+  dark: {
+    background: "#0d1117", foreground: "#d1d7e0", cursor: "#7aa2f7", cursorAccent: "#0d1117",
+    selectionBackground: "rgba(122,162,247,.30)",
+    black: "#1b1f27", red: "#f7768e", green: "#9ece6a", yellow: "#e0af68",
+    blue: "#7aa2f7", magenta: "#bb9af7", cyan: "#7dcfff", white: "#c0caf5",
+    brightBlack: "#5a6478", brightRed: "#ff9aae", brightGreen: "#b9f27c", brightYellow: "#ffd68a",
+    brightBlue: "#9ab8ff", brightMagenta: "#d4b0ff", brightCyan: "#a4e4ff", brightWhite: "#ffffff",
+  },
+  light: {
+    background: "#fbfcfd", foreground: "#24292f", cursor: "#4f46e5", cursorAccent: "#fbfcfd",
+    selectionBackground: "rgba(79,70,229,.18)",
+    black: "#24292f", red: "#c1121f", green: "#1a7f37", yellow: "#8a5a00",
+    blue: "#0b5cad", magenta: "#8250df", cyan: "#0e7490", white: "#6e7781",
+    brightBlack: "#57606a", brightRed: "#d1242f", brightGreen: "#1f883d", brightYellow: "#bf8700",
+    brightBlue: "#0969da", brightMagenta: "#a475f9", brightCyan: "#1b7c83", brightWhite: "#24292f",
+  },
+};
+
+// 当前活着的终端（切页后置空）。改配色时要同时改已经建好的终端，
+// 否则得刷新页面才生效。
+let liveTerms = [];
+
+function logTheme() {
+  try { return localStorage.getItem(LOG_THEME_KEY) === "light" ? "light" : "dark"; } catch (e) { return "dark"; }
+}
+
+function applyLogTheme(mode) {
+  const m = mode === "light" ? "light" : "dark";
+  document.body.classList.toggle("log-light", m === "light");
+  for (const s of liveTerms) {
+    if (s && s.term) s.term.options.theme = TERM_THEME[m];
+  }
+  document.querySelectorAll("[data-log-theme]").forEach((b) => {
+    b.textContent = m === "light" ? "深色底" : "浅色底";
+    b.title = m === "light" ? "切回深色（长时间看日志更省眼）" : "切成浅色（截图、投屏、打印）";
+  });
+  try { localStorage.setItem(LOG_THEME_KEY, m); } catch (e) { /* 隐私模式下写不进去，不影响本次显示 */ }
+}
+
+// 两个入口（日志页、终端）共用同一套文案与状态
+function logThemeButton() {
+  const b = el("button", { class: "ghost btn-sm", "data-log-theme": "1", text: "浅色底", onclick: () => {
+    applyLogTheme(logTheme() === "light" ? "dark" : "light");
+  } });
+  b.title = "切成浅色（截图、投屏、打印）";
+  return b;
+}
+
 // ---------- 日志 ----------
 
 function renderLogsView(root) {
@@ -3150,17 +3205,96 @@ function renderLogsView(root) {
   const linesSel = select([["100", "100 行"], ["200", "200 行"], ["500", "500 行"], ["1000", "1000 行"]], "200");
   const pre = el("pre", { class: "log tall", text: "" });
   const msg = el("div", { class: "msg" });
+  // 大小这行单独放：它是「要不要清理」的唯一依据，不能只在悬停或下拉里出现
+  const sizeLine = el("div", { class: "hint log-size", text: "统计中…" });
   const auto = el("input", { type: "checkbox" });
-  let timer = null;
+  const cleanBtn = el("button", { class: "ghost danger", text: "清理…", onclick: () => clean() });
+  let sources = [];
+  let journalBytes = 0;
+  // 最近一次读到的结果：确认框里的「当前多大」用它，比来源列表新鲜
+  let lastRead = null;
+
+  const current = () => sources.find((s) => s.key === sourceSel.value) || {};
+
+  // 文件来源：这次读到的真实文件大小（每 3 秒自动刷新都会更新）。
+  // journal 来源：journald 的总占用，单条单元的量没有便宜的查法。
+  const paintSize = (d) => {
+    const s = current();
+    const bits = [];
+    if (s.kind === "file") {
+      const size = d && typeof d.size === "number" ? d.size : s.size;
+      bits.push("文件大小 " + fmtBytes(numv(size)));
+      const mt = (d && d.mtime) || s.mtime;
+      if (mt) bits.push("最后写入 " + fmtTime(mt));
+    } else if (s.kind === "journal") {
+      bits.push("journald 合计 " + fmtBytes(journalBytes));
+      bits.push("该来源不单独统计");
+    }
+    sizeLine.textContent = bits.join(" · ") || "";
+    // journal 来源清理的是全机日志，措辞也要跟着变
+    cleanBtn.textContent = s.kind === "journal" ? "回收 journald…" : "清空此日志…";
+    cleanBtn.disabled = !s.key;
+  };
 
   const load = async () => {
     msg.className = "msg";
     msg.textContent = "读取中…";
     try {
       const d = await api("GET", "/api/v1/logs?source=" + encodeURIComponent(sourceSel.value) + "&lines=" + linesSel.value);
+      lastRead = d;
       pre.textContent = (d.lines || []).join("\n") || "（无内容）";
       pre.scrollTop = pre.scrollHeight;
       msg.textContent = d.note || (d.has_more ? "已显示末尾 " + linesSel.value + " 行" : "");
+      paintSize(d);
+    } catch (e) {
+      msg.className = "msg err";
+      msg.textContent = e.message;
+    }
+  };
+
+  const loadSources = async () => {
+    try {
+      const d = await api("GET", "/api/v1/logs/sources");
+      sources = d.items || [];
+      journalBytes = numv(d.journal_bytes);
+      const keep = sourceSel.value;
+      sourceSel.replaceChildren.apply(sourceSel, sources.map((s) =>
+        el("option", { value: s.key, text: sourceOption(s) })));
+      if (sources.some((s) => s.key === keep)) sourceSel.value = keep;
+      paintSize(null);
+    } catch (e) {
+      msg.className = "msg err";
+      msg.textContent = e.message;
+    }
+  };
+
+  // 清空是不可逆的：文案必须写清「清谁、多大、会不会影响别的服务」，
+  // 再让用户点一次确认。后端还要 confirm=CLEAN，两层都要过。
+  const clean = async () => {
+    const s = current();
+    if (!s.key) return;
+    const isFile = s.kind === "file";
+    const fresh = lastRead && lastRead.source === s.key ? numv(lastRead.size) : 0;
+    const before = isFile ? (fresh || numv(s.size)) : journalBytes;
+    let text;
+    if (isFile) {
+      text = "将清空「" + s.label + "」\n" + (s.detail || "") +
+        "\n当前 " + fmtBytes(before) + "\n\n文件本身会保留，nginx / 面板继续往同一个文件写，" +
+        "不用重启任何服务。已写入的内容无法恢复。";
+    } else {
+      text = "将执行 journalctl --vacuum-size=50M，把 journald 的全部日志压到 50 MB 以下。" +
+        "\n当前 " + fmtBytes(before) + "\n\n注意：journald 是全机共用的，" +
+        "其它服务（SSH、系统日志等）的旧记录会一起被删掉。";
+    }
+    if (!confirm(text)) return;
+    msg.className = "msg";
+    msg.textContent = "清理中…";
+    try {
+      const r = await api("POST", "/api/v1/logs/clean", { source: s.key, confirm: "CLEAN", target_mb: 50 });
+      await loadSources();
+      await load();
+      msg.className = "msg ok";
+      msg.textContent = r.note + (numv(r.freed) > 0 ? "，释放 " + fmtBytes(numv(r.freed)) : "");
     } catch (e) {
       msg.className = "msg err";
       msg.textContent = e.message;
@@ -3172,11 +3306,7 @@ function renderLogsView(root) {
     if (auto.checked) state.timer = setInterval(load, 3000);
   };
 
-  api("GET", "/api/v1/logs/sources").then((d) => {
-    sourceSel.replaceChildren.apply(sourceSel, (d.items || []).map((s) =>
-      el("option", { value: s.key, text: s.label + (s.present ? "" : "（不可用）") })));
-    load();
-  }).catch((e) => { msg.className = "msg err"; msg.textContent = e.message; });
+  loadSources().then(load);
 
   sourceSel.addEventListener("change", load);
   linesSel.addEventListener("change", load);
@@ -3187,10 +3317,22 @@ function renderLogsView(root) {
       sourceSel, linesSel,
       el("label", { class: "row check-inline" }, [auto, el("span", { text: "自动刷新" })]),
       el("div", { class: "spacer" }),
-      el("button", { text: "刷新", onclick: load }),
+      logThemeButton(),
+      cleanBtn,
+      el("button", { class: "ghost", text: "刷新", onclick: () => { loadSources(); load(); } }),
     ]),
+    sizeLine,
     msg, pre,
+    el("div", { class: "hint", text: "六个来源都是固定白名单，不接受任意路径。清空文件用的是截断而不是删除：删掉之后 nginx 会继续往一个谁也打不开的旧 inode 里写，日志从此消失。" }),
   ]));
+}
+
+// 下拉里的来源带上大小：选之前就知道哪个日志在涨
+function sourceOption(s) {
+  let t = s.label;
+  if (s.kind === "file" && numv(s.size) > 0) t += " · " + fmtBytes(s.size);
+  if (!s.present) t += "（不可用）";
+  return t;
 }
 
 // ---------- 中转 ----------
@@ -4045,7 +4187,7 @@ function renderSettingsView(root) {
     }
     applyUpdateInfo(u);
     const body = [
-      el("div", { class: "row wrap" }, [
+      el("div", { class: "row wrap log-status" }, [
         badge("当前 " + u.current, "muted"),
         u.available ? badge("可更新到 " + u.latest, "ok") : badge("已是最新", "ok"),
         el("span", { class: "hint", text: "检查于 " + fmtTime(u.checked_at) + " · 每次打开会自动检查" }),
@@ -4257,14 +4399,9 @@ function renderSettingsView(root) {
     ]),
     card("服务单元", [unitBox]),
     (updateCard = card("版本更新", [
-      // 按钮与说明拆成两行：说明有一整句长文案，与按钮挤在同一行时
-      // 会被 flex 压成窄条、换行位置随窗口宽度乱跳，视觉上像贴着按钮。
-      el("div", { class: "actions", style: "margin-top:0" }, [
-        el("button", { text: "检查更新", onclick: manualCheck }),
-      ]),
-      el("div", { class: "hint", style: "margin-top:10px", text: "打开本页会自动检查；也可以随时手动回源。更新从 GitHub Release 下载，校验 sha256 后原子替换，保留上一版" }),
+      el("div", { class: "hint", text: "打开本页会自动检查；也可以随时手动回源。更新从 GitHub Release 下载，校验 sha256 后原子替换，保留上一版" }),
       updateBox,
-    ])),
+    ], [el("button", { class: "ghost btn-sm", text: "检查更新", onclick: manualCheck })])),
   );
   load();
 }
@@ -4297,6 +4434,8 @@ function watchJob(job, onDone) {
 // ---------- 启动 ----------
 
 async function boot() {
+  // 日志 / 终端配色是浏览器本地偏好，进页面先落地，避免黑框闪一下再变白
+  applyLogTheme(logTheme());
   try {
     const data = await api("GET", "/api/v1/auth/state");
     state.csrf = data.csrf;

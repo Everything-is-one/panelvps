@@ -279,8 +279,33 @@ REALITY 层，先核对客户端里的**公钥（pbk）与 shortId** 是否与�
 | 服务与进程 | 服务名正则白名单、动作白名单（start/stop/restart/reload/enable/disable） |
 | Web 终端 | PTY + WebSocket；一次性票据（2 分钟、单次使用），不把 Cookie 放进 URL；shell 必须是绝对路径 |
 | 防火墙 | `nft` 建表探测失败自动降级 `iptables-legacy`；SSH 与面板端口**永远排在用户 drop 规则之前**；nft set 自带 timeout 实现到期自动解封 |
-| 日志 | 六个固定来源，不接受任意路径；只 seek 文件末尾 512KB，不会把整个日志读进内存 |
+| 日志 | 六个固定来源，不接受任意路径；只 seek 文件末尾 512KB，不会把整个日志读进内存；来源列表带文件大小，清理只允许打在白名单来源上（见下） |
 | 异步任务 | 内存态执行器，并发 2、单任务 15 分钟超时、日志上限 256KB，避免 apt/证书撑爆 HTTP 超时 |
+
+### 日志：大小、清理、配色
+
+**大小怎么来的。** 文件来源直接 `stat`，读取结果里也带一份，所以每 3 秒自动刷新
+都能看到数字在涨，不用额外请求。journal 来源没有等价的廉价统计：想知道某个单元占
+多少，得把 `journalctl --output=json` 跑一遍，几百 MB 的 journal 上这一下就是几秒 CPU。
+所以那类来源只显示 **journald 的总占用**——遍历 `/var/log/journal`（持久化）与
+`/run/log/journal`（`Storage=volatile`）求和，比解析 `journalctl --disk-usage` 的输出可靠，
+后者是带本地化的自然语言句子。
+
+**清理打在白名单上，不是路径上。** 接口只收 `source` 键，路径由 `catalog()` 决定：
+
+| 来源类型 | 做法 | 为什么 |
+|---|---|---|
+| 文件（nginx / 面板 / Xray） | `os.Truncate(path, 0)` | **不能删文件**：nginx 与面板还拿着这个 inode 在写，删掉之后它们会继续写进一个谁也打不开的幽灵文件，日志从此消失。截断保留 inode，写入方不用重启 |
+| journal | `journalctl --rotate` 后 `--vacuum-size=50M` | 正在写的活动文件不参与回收，不先轮转基本等于什么都没做；下限 8MB，再往下会把当次会话的记录也删掉 |
+
+journald 是全机共用的，回收会连带删掉其它服务的旧记录，界面上这句提示写在确认框里。
+服务端还要求 `confirm=CLEAN`（与重启面板同一套约定），并记一条 `log_clean` 审计。
+
+**深色 / 浅色底。** 日志框与终端默认黑底（长时间盯日志更省眼），可以切浅色给截图、
+投屏、打印用。这是浏览器本地偏好（`localStorage` 的 `panelvps.logTheme`），不进配置文件：
+它纯属显示偏好，换台电脑看不出来是正常的。切换会同时改已建好的 xterm（`term.options.theme`），
+不需要刷新。浅色不是把深色反过来——ANSI 的绿、黄在白底上必须压暗，否则直接糊成一片。
+
 
 ## 忘记密码：先确认服务在用哪个库
 

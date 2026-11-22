@@ -620,6 +620,25 @@ pre.log {
 pre.log.tall { max-height: 460px; min-height: 160px; }
 /* 日志页的「已显示末尾 N 行」和黑框之间补一点呼吸 */
 .msg + pre.log { margin-top: 8px; }
+/* 版本状态徽标与下面的版本说明：两块紧贴着时「已是最新」像是掉进黑框里了 */
+.row.log-status { margin-top: 10px; }
+.log-status + pre.log { margin-top: 10px; }
+/* 「文件大小 / 最后写入」：比正文弱一档，但必须一直在，它是清理按钮的依据 */
+.log-size { margin-top: 10px; font-variant-numeric: tabular-nums; }
+
+/* ---------- 浅色底（日志框与终端） ----------
+ * 深色是默认：长时间盯日志、看终端输出更省眼。浅色给截图、投屏、打印用，
+ * 由 body.log-light 统一切换；偏好存在浏览器 localStorage，不进配置文件。
+ * xterm 的调色板在 TERM_THEME 里，同样两套。 */
+body.log-light pre.log {
+  background: #f8fafc; color: #1f2937; border-color: var(--border-strong);
+}
+body.log-light .term-host,
+body.log-light .term {
+  background: #fbfcfd; color: #24292f; border-color: var(--border-strong);
+  box-shadow: var(--shadow-sm);
+}
+body.log-light .term-host:focus-within { border-color: var(--accent); }
 textarea.link-box { resize: vertical; font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; }
 
 .qr { text-align: center; margin-top: 16px; }
