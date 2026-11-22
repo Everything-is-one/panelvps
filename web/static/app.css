@@ -859,9 +859,14 @@ table.files tr.row-up td { padding-top: 10px; padding-bottom: 10px; background: 
  * 这里要表达的是「哪一块占大头」，不是让四块并列抢注意力。
  */
 .mp-head {
+  display: flex; align-items: baseline; gap: 8px;
   font-size: 11.5px; color: var(--muted); letter-spacing: .02em;
   font-variant-numeric: tabular-nums;
 }
+/* 三档口径的对照值：贴右侧，弱于标题，但保证能一眼对着 free -m 核 */
+.mp-head > span { white-space: nowrap; }
+.mp-head > span:first-child { overflow: hidden; text-overflow: ellipsis; }
+.mp-head .mp-sub { margin-left: auto; color: var(--muted-2); }
 .mp-bar {
   display: flex; height: 6px; border-radius: 999px; overflow: hidden;
   background: var(--surface-3); margin: 7px 0 9px;

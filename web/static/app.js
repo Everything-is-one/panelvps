@@ -359,20 +359,24 @@ function topTipBody(kind, data) {
 // 内存构成：把「实际占用」再往下拆一层。
 //
 // 起因是一个必然会问的问题：卡片写「实际 313 MB」，往下看前 5 名进程只有
-// 133 MB，剩下的 180 MB 去哪了？答案分散在三个地方——另外几十个小进程、
-// 内核自己（slab / 页表 / 内核栈）、tmpfs。它们都不属于「进程排行」，
-// 但不写出来，这个数就永远像凭空冒出来的。
-function memPartsBlock(p, used) {
-  // 颜色只用一个强调色 + 三档灰：面板的约束是单调色系，
-  // 四块彩色会把「实际占用」这个主次关系冲淡。
+// 133 MB，剩下的 180 MB 去哪了？答案分散在四个地方——另外几十个小进程、
+// 内核自己（slab / 页表 / 内核栈）、tmpfs、以及内核不肯回收的那部分页缓存。
+// 它们都不属于「进程排行」，但不写出来，这个数就永远像凭空冒出来的。
+function memPartsBlock(s) {
+  const p = s.mem_parts;
+  const used = numv(s.mem_used);
+  // 颜色只用一个强调色 + 四档灰：面板的约束是单调色系，
+  // 五块彩色会把「实际占用」这个主次关系冲淡。
   const parts = [
     { key: "anon", name: "进程匿名", v: numv(p.anon), color: "var(--accent)",
       hint: "堆、栈、Go heap：所有进程加总，不只前 5" },
-    { key: "shmem", name: "tmpfs / 共享内存", v: numv(p.shmem), color: "#8d9bb5",
+    { key: "shmem", name: "tmpfs / 共享内存", v: numv(p.shmem), color: "#7d8aa3",
       hint: "没有 swap 时收不回来，所以算实际占用" },
-    { key: "kernel", name: "内核", v: numv(p.kernel), color: "#b9c1d0",
+    { key: "kernel", name: "内核", v: numv(p.kernel), color: "#98a3b8",
       hint: "不可回收 slab、内核栈、页表" },
-    { key: "other", name: "其它", v: numv(p.other), color: "var(--cache)",
+    { key: "cold", name: "页缓存（暂不可回收）", v: numv(p.cold_cache), color: "#b4bece",
+      hint: "页缓存里内核没算进 MemAvailable 的部分：块设备元数据页、被映射钉住的页。内存紧张时仍可能被收回，所以它是「实际」里最软的一块" },
+    { key: "other", name: "其它", v: numv(p.other), color: "#d5dae4",
       hint: "per-cpu、vmalloc、驱动缓冲等" },
   ].filter((x) => x.v > 0);
   if (!parts.length) return [];
@@ -393,7 +397,11 @@ function memPartsBlock(p, used) {
   ]));
 
   return [
-    el("div", { class: "mp-head", text: "实际 " + fmtBytes(used) + " 的构成" }),
+    el("div", { class: "mp-head" }, [
+      el("span", { text: "实际 " + fmtBytes(used) + " 的构成" }),
+      // 三档的口径写在这里：用户拿 free -m 对照时最容易卡住的就是这个数
+      el("span", { class: "mp-sub", text: "空闲 " + fmtBytes(numv(s.mem_free)) }),
+    ]),
     el("div", { class: "mp-bar" }, segs),
     ...rows,
   ];
@@ -403,7 +411,7 @@ function memTipBody(data) {
   const nodes = [];
   const used = numv(memSnap && memSnap.mem_used);
   if (memSnap && memSnap.mem_parts && used > 0) {
-    nodes.push(...memPartsBlock(memSnap.mem_parts, used));
+    nodes.push(...memPartsBlock(memSnap));
   }
 
   const items = data.items || [];
@@ -945,8 +953,9 @@ function memLegend(s) {
     el("i", { class: "lg-dot " + cls }), el("span", { text }),
   ]);
   const items = [item("used " + level, "实际 " + fmtBytes(used))];
-  // 缓存为 0 时不必硬写「缓存 0」：条上本来就没有那一段，写了只是噪音
-  if (cache > 0) items.push(item("cache", "缓存 " + fmtBytes(cache)));
+  // 这一档是「可用 - 空闲」，含可回收 slab，所以叫「可回收」而不是「缓存」：
+  // 全量页缓存里有一块内核不认，那部分已经算进「实际」了。
+  if (cache > 0) items.push(item("cache", "可回收 " + fmtBytes(cache)));
   items.push(item("free", "空闲 " + fmtBytes(free)));
   items.push(el("span", { class: "lg-total", text: (s.container ? "限额 " : "共 ") + fmtBytes(total) }));
   return el("div", { class: "d legend" }, items);
