@@ -9,6 +9,45 @@ README 只讲「能做什么」，本文讲「做到什么程度、为什么这�
 - 面板 + Xray + Nginx + PHP 按 320MB 以内设计，512MB 可用内存下仍有余量
 - 不做容器管理、不做大而全的应用市场、不做多节点
 
+## 内存口径
+
+概览把内存切成三档，刻意不用 `free` 的「used」：
+
+| 档 | 算法 | 含义 |
+|---|---|---|
+| 实际 | `MemTotal - MemAvailable` | 真占住了、要回收就得动手的量 |
+| 缓存 | `Cached + Buffers + SReclaimable - Shmem` | 随手可丢的页缓存，高不是问题 |
+| 空闲 | `总量 - 实际 - 缓存` | 真正闲置的部分 |
+
+为什么不用 `MemFree` 当空闲：内核会把空闲内存全拿去做页缓存，`MemFree` 长期只剩几十
+MB，机器明明没事却像要爆了。减 `Shmem` 是因为 tmpfs 在没有 swap 时收不回来，算进
+「缓存」会让人以为随时能还。
+
+**「实际」为什么远大于前 5 名进程之和？** 因为这个数是全机的，而进程排行只列头部：
+
+| 构成 | 来源（`/proc/meminfo`） | 说明 |
+|---|---|---|
+| 进程匿名 | `AnonPages` | 堆、栈、Go heap、`mmap(MAP_ANON)`，**所有进程**加总 |
+| tmpfs / 共享内存 | `Shmem` | 无 swap 收不回，所以算实际占用 |
+| 内核 | `SUnreclaim + KernelStack + PageTables` | slab、内核栈、页表 |
+| 其它 | 余项 | per-cpu、vmalloc、驱动缓冲等 |
+
+容器口径下这四项改读 `memory.stat`（`anon` / `shmem` / `slab_unreclaimable`），
+因为 `/proc/meminfo` 在容器里报的是宿主机的数。
+
+还有一处容易误会：**RSS 会重复计算共享页**（每个进程都把自己映射到的共享库算进
+自己的 RSS），所以「所有进程 RSS 之和」不能和「实际占用」直接相减。它只适合回答
+「前 5 之外的那些进程大概占多少」。
+
+排查用的命令：
+
+```bash
+free -m
+grep -E 'MemTotal|MemAvailable|AnonPages|Shmem|SUnreclaim|KernelStack|PageTables' /proc/meminfo
+ps -eo rss= | awk '{s+=$1} END {printf "所有进程 RSS 合计 %.0f MB\n", s/1024}'
+sudo slabtop -o -s c | head -12
+```
+
 ## 安全契约
 
 | 能力 | 说明 |
