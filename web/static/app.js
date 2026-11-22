@@ -3603,8 +3603,28 @@ function renderStoreView(root) {
   cat.addEventListener("change", paint);
   viewSel.addEventListener("change", paint);
 
+  // 软件商店是「沙箱挡路」最先暴露的地方：apt 装包要写 /usr /etc /var，
+  // 而旧单元的 ProtectSystem 会让 dpkg 在 unpack 阶段报 read-only file
+  // system —— 四十行日志之后才失败，用户看到的却只是「安装失败」。
+  // 单元与内置版本不一致时进门就说，别等到装了一半。
+  const unitWarn = el("div", { class: "banner update-banner", style: "display:none" });
+  (async () => {
+    try {
+      const u = await api("GET", "/api/v1/system/unit");
+      if (!u.present || u.match) return;
+      unitWarn.style.display = "";
+      unitWarn.replaceChildren(
+        el("span", { text: "磁盘上的服务单元是旧版本：它的沙箱策略会让装包报 read-only file system。" }),
+        el("button", { class: "ghost", text: "去设置同步", onclick: () => renderApp("settings") }),
+      );
+    } catch (_) {
+      // 非 Linux、无 systemd、或接口不可用：不打扰
+    }
+  })();
+
   root.replaceChildren(card("软件商店", [
     el("div", { class: "hint", text: "清单是声明式的（apt / 下载 / 解压 / 写文件 / 路径 / 服务 / 校验），不含自由脚本。安装会真实调用 apt 或下载二进制，可能需要几分钟。" }),
+    unitWarn,
     el("div", { class: "row wrap toolbar" }, [search, cat, viewSel,
       el("div", { class: "spacer" }),
       el("button", { class: "ghost", text: "刷新", onclick: load })]),
