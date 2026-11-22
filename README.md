@@ -92,7 +92,7 @@ go build -trimpath -ldflags "-s -w" -o bin/panelvps ./cmd/panelvps
 交叉编译两个架构：`./scripts/build.sh`。
 
 ```
-cmd/panelvps/     CLI 入口（serve / init / info / reset-password / relay）
+cmd/panelvps/     CLI 入口（serve / init / info / check / reset-password / relay）
 internal/         认证、文件沙箱、防火墙、Xray、站点、商店、备份、自更新…
 web/              embed 的前端（零构建原生 JS + xterm.js）
 deploy/           systemd 单元、容器覆盖、安装与引导脚本

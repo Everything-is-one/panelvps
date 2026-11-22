@@ -144,6 +144,19 @@ env_report() {
         warn "无 journalctl —— 日志页只能读文件，初始密码需看前台输出"
     fi
 
+    # 配置能不能解析，是「装完起不来」里最常见也最难自查的一种：
+    # 报错只有一行 yaml: line N: ...，不说 N 是哪一行。
+    if [[ -x "$BIN" && -r "$CONF" ]]; then
+        local crc=0
+        "$BIN" check -config "$CONF" >/dev/null 2>&1 || crc=$?
+        case "$crc" in
+            0)  ok "配置文件可解析: $CONF" ;;
+            2)  : ;;   # 老版本二进制没有 check 子命令
+            *)  bad "配置文件解析失败，服务会启动即退出："
+                bad "  看细节 panelvps check -config $CONF ；能自动修就加 -fix" ;;
+        esac
+    fi
+
     local entry bin why
     for entry in "nginx|站点配置下发" "certbot|申请证书" "xray|代理功能"; do
         bin="${entry%%|*}"
@@ -378,6 +391,34 @@ fi
 systemctl daemon-reload
 systemctl enable panelvps >/dev/null
 systemctl enable panelvps-sysctl >/dev/null 2>&1 || true
+
+info "检查配置"
+# 配置坏了的时候服务会无限重启（单元里是 Restart=always），systemd 状态里
+# 只有 status=1/FAILURE，journald 里只有一行「yaml: line N: ...」。所以启动
+# 之前先解析一遍：能修就修（已知形态，改前备份），修不了就带着出错行停手。
+CHECK_OUT=$(mktemp)
+CHECK_RC=0
+"$BIN" check -config "$CONF" >"$CHECK_OUT" 2>&1 || CHECK_RC=$?
+if [[ "$CHECK_RC" -eq 2 ]]; then
+    # 老版本二进制没有 check 子命令，不能因此挡住安装
+    info "当前二进制不支持 check，跳过配置预检"
+    CHECK_RC=0
+elif [[ "$CHECK_RC" -ne 0 ]]; then
+    sed 's/^/  /' "$CHECK_OUT" >&2
+    warn "配置解析失败，尝试按已知形态修复"
+    "$BIN" check -config "$CONF" -fix 2>&1 | sed 's/^/  /' || true
+    CHECK_RC=0
+    "$BIN" check -config "$CONF" >"$CHECK_OUT" 2>&1 || CHECK_RC=$?
+fi
+if [[ "$CHECK_RC" -ne 0 ]]; then
+    echo
+    sed 's/^/  /' "$CHECK_OUT" >&2
+    echo
+    rm -f "$CHECK_OUT"
+    warn "上面标 → 的那一行就是要改的地方；改好 $CONF 后重跑本脚本。"
+    die "配置预检未通过，未启动服务（避免 systemd 无限重启刷日志）"
+fi
+rm -f "$CHECK_OUT"
 
 info "启动服务"
 systemctl start panelvps

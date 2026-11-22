@@ -33,8 +33,49 @@ import (
 // knownSubcommands 与 main 里的 switch 保持一致，用来区分「服务进程」和
 // 「一次性 CLI 调用」。
 var knownSubcommands = map[string]bool{
-	"menu": true, "serve": true, "version": true, "info": true,
+	"menu": true, "serve": true, "version": true, "info": true, "check": true,
 	"init": true, "reset-password": true, "relay": true,
+}
+
+// runCheck 只回答一个问题：这份配置能不能启动。
+//
+// 为什么要单独一条命令：配置坏了的时候服务会无限重启，systemd 状态里
+// 只有「status=1/FAILURE」，journald 里只有一行「yaml: line 24: ...」。
+// 安装脚本在 systemctl start 之前先跑这个，就能带着上下文停手，而不是
+// 先看着它重启三十次再让人去数第 24 行。
+func runCheck(cfgPath string, fix bool) error {
+	if err := config.Check(cfgPath); err != nil {
+		if !fix {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, "配置有问题，尝试按已知形态修复：")
+		changed, notes, rerr := config.Repair(cfgPath)
+		if rerr != nil {
+			return rerr
+		}
+		if !changed {
+			fmt.Fprintln(os.Stderr, "  不是已知的损坏形态，未改动。请按上面的提示手工修改。")
+			return err
+		}
+		for _, n := range notes {
+			fmt.Fprintf(os.Stderr, "  %s\n", n)
+		}
+		fmt.Fprintf(os.Stderr, "  原文件已备份到 %s.bak\n", cfgPath)
+		if err := config.Check(cfgPath); err != nil {
+			return err
+		}
+		fmt.Println("已修复。")
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("配置可解析: %s\n", cfgPath)
+	fmt.Printf("  listen    %s\n", cfg.Listen)
+	fmt.Printf("  data_dir  %s\n", cfg.DataDir)
+	fmt.Printf("  数据库    %s\n", cfg.DBPath)
+	fmt.Printf("  ssh_ports %v\n", cfg.SSHPorts)
+	return nil
 }
 
 // runningService 描述正在运行的 panelvps serve 进程。

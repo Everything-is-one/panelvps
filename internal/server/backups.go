@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Everything-is-one/panelvps/internal/backup"
+	"github.com/Everything-is-one/panelvps/internal/config"
 	"github.com/Everything-is-one/panelvps/internal/version"
 )
 
@@ -214,11 +215,26 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 	for _, suffix := range []string{"-wal", "-shm"} {
 		_ = os.Remove(s.cfg.DBPath + suffix)
 	}
+	// 恢复完紧接着就是重启，所以配置必须先证明自己能解析。
+	// 备份包里存的正是「当时那份配置」——如果它是坏的（0.4.8 之前改过
+	// SSH 端口的机器就是这个状态），原样写回去会让面板重启后无限重启，
+	// 而且数据库已经换过了，用户连回滚的参照都没了。
+	confNote := ""
 	if confSrc := filepath.Join(staging, "conf", "panel.yaml"); fileExists(confSrc) {
 		if p := s.cfg.Path(); p != "" {
 			if raw, err := os.ReadFile(confSrc); err == nil {
-				_ = os.WriteFile(p+".pre-restore-"+ts, raw, 0o600)
-				_ = os.WriteFile(p, raw, 0o600)
+				fixed, notes, perr := config.Sanitize(raw)
+				switch {
+				case perr != nil:
+					s.logger.Warn("备份内的配置文件无法解析，已跳过配置恢复，仅恢复数据库", "err", perr)
+					confNote = "；备份里的配置文件无法解析，已跳过（沿用当前配置）"
+				default:
+					_ = os.WriteFile(p+".pre-restore-"+ts, fixed, 0o600)
+					_ = os.WriteFile(p, fixed, 0o600)
+					if len(notes) > 0 {
+						confNote = "；备份里的配置文件已顺带修复"
+					}
+				}
 			}
 		}
 	}
@@ -228,7 +244,7 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{
 		"staged":           false,
 		"restart_required": true,
-		"message":          "数据库已替换，面板将在 2 秒后重启以加载新数据。",
+		"message":          "数据库已替换，面板将在 2 秒后重启以加载新数据。" + confNote,
 	})
 	go func() {
 		time.Sleep(2 * time.Second)

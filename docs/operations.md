@@ -377,6 +377,87 @@ sudo /opt/panelvps/bin/panelvps reset-password -db /opt/panelvps/data/panel.db -
 | 告警 | 单一通用 Webhook（POST JSON），5 分钟内相同标题去重，避免告警风暴 |
 | 自更新 | 只信任 https + GitHub 域名的 release 资源；下载后校验 sha256，替换前校验 ELF 头，保留 `.old-<时间戳>`；打开面板与设置页自动检查，服务端缓存 10 分钟避免打满 GitHub 未认证限流 |
 
+## 配置坏了起不来：先 check，再修
+
+**症状**：升级或重启后面板起不来，`systemctl status panelvps` 只有 `status=1/FAILURE`，
+journald 里反复出现同一行：
+
+```
+错误: 读取配置 /opt/panelvps/conf/panel.yaml 失败: 解析配置 ... 失败:
+yaml: line 24: did not find expected key
+```
+
+单元里是 `Restart=always`，配置解析不了它就会一直重启，把日志刷满，但错误本身只有行号。
+
+**先看它到底哪一行坏了**：
+
+```bash
+panelvps check -config /opt/panelvps/conf/panel.yaml
+```
+
+输出会把出错行和上下两行一起标出来（`→` 就是出错行），并对已知形态直接给改法。
+
+**再试一次自动修复**：
+
+```bash
+panelvps check -config /opt/panelvps/conf/panel.yaml -fix
+```
+
+目前只认一种形态：某个键已经是单行写法，而它原来的分行列表项还留在下面。
+修得动就改，改前把原文留在 `panel.yaml.bak`；认不出来的坏法一律不猜——
+配置里每一行都是用户的环境（端口、邮箱、域名），猜错比不修更糟。
+
+**手动改法**（不想用 `-fix` 时）：
+
+```bash
+sed -n '20,30p' /opt/panelvps/conf/panel.yaml     # 先看清
+cp /opt/panelvps/conf/panel.yaml{,.bak}
+```
+
+把这几行
+
+```yaml
+ssh_ports: [2222]
+    - 22
+```
+
+改成下面任一种即可（单行或分行，YAML 里等价）：
+
+```yaml
+ssh_ports: [2222]
+```
+
+```yaml
+ssh_ports:
+  - 2222
+```
+
+改完 `systemctl start panelvps`。若是 v0.4.9 之前的版本，顺手把面板也升级：
+重跑安装脚本会在启动前先跑一遍 `panelvps check`，通不过就停手，不会再让你看着它重启三十次。
+
+### 这个坑是怎么来的
+
+`yaml.Marshal` 把 `[]int{22}` 写成两行，而旧版 `PatchScalar`（改 SSH 端口、
+改访问后缀、改终端开关都走它）只替换键所在的那一行：
+
+```yaml
+ssh_ports: [2222]
+    - 22          # 孤儿：属于同一个键，但键已经变成单行了
+```
+
+于是整份配置立刻变成非法 YAML，而**写入时不报错、也没有人重新解析**：进程还在跑、
+配置在内存里，一切正常。故障被推迟到下一次重启——表现就是「升级后面板起不来」，
+和「改 SSH 端口」八竿子打不着。这也是 0.4.8 那次覆盖安装后无限重启的根因。
+
+v0.4.9 起有四道闸：
+
+| 位置 | 做法 |
+|---|---|
+| `PatchScalar` | 按**整块**替换（键行 + 从属缩进行/列表项），不再留孤儿 |
+| `PatchScalar` | 写前自检：改完解析不了就放弃写入，原文件不动；文件本来就坏了也拒绝改 |
+| `install.sh` | `systemctl start` 之前先 `panelvps check`，失败先尝试 `-fix`，仍失败就带着出错行退出 |
+| 备份恢复 | 备份包里的 `panel.yaml` 先 `Sanitize` 再写：恢复完紧接着就是重启，坏配置等于埋雷 |
+
 ## systemd 沙箱与可写目录
 
 **当前写法（v0.4.6 起）：默认放开，只读点名。**

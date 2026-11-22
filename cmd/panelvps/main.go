@@ -67,6 +67,7 @@ func main() {
 	username := fs.String("user", "admin", "管理员用户名")
 	dbOverride := fs.String("db", "", "直接指定数据库文件，跳过配置文件里的 data_dir 推导（救急用）")
 	newPassword := fs.String("password", "", "指定新密码，留空则随机生成（仅 reset-password 使用）")
+	fixConfig := fs.Bool("fix", false, "尝试修复已知的配置损坏，改动前备份为 .bak（仅 check 使用）")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `PanelVPS %s
 
@@ -78,6 +79,7 @@ func main() {
   serve             前台启动服务
   version           打印版本信息
   info              打印配置、运行中的服务与数据库体检
+  check             只检查配置能否解析，不改任何文件（安装脚本启动前用）
   init              创建管理员账号（已存在则跳过）
   reset-password    重置管理员密码为随机值
   relay             前台运行一条端口转发（不需要配置文件与数据库）
@@ -104,6 +106,8 @@ func main() {
 		fmt.Printf("panelvps %s (commit %s, built %s)\n", version.Version, version.Commit, version.BuildAt)
 	case "info":
 		err = runInfo(*cfgPath, *dbOverride)
+	case "check":
+		err = runCheck(*cfgPath, *fixConfig)
 	case "init":
 		err = runInit(*cfgPath, *username, *dbOverride)
 	case "reset-password":

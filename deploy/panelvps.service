@@ -3,6 +3,14 @@ Description=PanelVPS - 轻量服务器管理面板
 Documentation=https://github.com/Everything-is-one/panelvps
 After=network-online.target
 Wants=network-online.target
+# 启动连环失败时停手，别无限重试。
+#
+# Restart=always + RestartSec=5s 遇上「启动即退出」的错误（最典型是配置文件
+# 解析不了）会永远重启下去：两分钟刷出三十几条 active (auto-restart)，
+# journald 里是同一行错误重复，`systemctl status` 也永远看不出「它已经坏了」。
+# 一分钟内失败 10 次就置为 failed（start-limit-hit），排查时一眼可见。
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
