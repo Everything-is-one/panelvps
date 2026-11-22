@@ -155,6 +155,11 @@ function fmtBytes(n) {
   return v.toFixed(i === 0 ? 0 : 1) + " " + units[i];
 }
 
+// 内存的小字对照用的整数 MB：这行和标题挤在一起，小数位会把标题顶成省略号
+function mbRough(n) {
+  return Math.round(numv(n) / 1048576) + " MB";
+}
+
 function pct(used, total) {
   if (!total) return 0;
   return Math.min(100, Math.round((used / total) * 100));
@@ -207,9 +212,9 @@ function statCard(key, value, desc, percent, topKind) {
   // desc 既可以是字符串，也可以是一个已构造好的节点（内存卡片要带色点图例）
   if (desc) kids.push(typeof desc === "string" ? el("div", { class: "d", text: desc }) : desc);
   if (topKind) {
-    // 磁盘卡片能点开明细，所以角标写「明细」而不是「前 5」：
-    // 提示语和实际行为对不上，用户就会一直只 hover 不点。
-    kids[0].appendChild(el("span", { class: "stat-more", text: topKind === "disk" ? "明细" : "前 5" }));
+    // 角标要和浮层的内容对上：磁盘是逐目录明细、内存是「构成 + 进程」，
+    // 只有 CPU 真的是「前 5」。提示语和实际行为不一致，用户就会一直只 hover 不点。
+    kids[0].appendChild(el("span", { class: "stat-more", text: topKind === "cpu" ? "前 5" : "明细" }));
     const box = el("div", { class: "stat" }, kids);
     bindTopTip(box, topKind, key);
     if (topKind === "disk") {
@@ -358,15 +363,17 @@ function topTipBody(kind, data) {
 
 // 内存构成：把「实际占用」再往下拆一层。
 //
-// 起因是一个必然会问的问题：卡片写「实际 313 MB」，往下看前 5 名进程只有
-// 133 MB，剩下的 180 MB 去哪了？答案分散在四个地方——另外几十个小进程、
-// 内核自己（slab / 页表 / 内核栈）、tmpfs、以及内核不肯回收的那部分页缓存。
+// 起因是一个必然会问的问题：卡片写「实际 137 MB」，往下看前 5 名进程只有
+// 76 MB，剩下的 60 MB 去哪了？答案分散在四个地方——另外几十个小进程、
+// 内核自己（slab / 页表 / 内核栈）、tmpfs、以及少数没被单独统计的内核分配。
 // 它们都不属于「进程排行」，但不写出来，这个数就永远像凭空冒出来的。
+//
+// 页缓存不在这里：「实际占用」按 htop / free 的 used 口径，本来就不含它。
 function memPartsBlock(s) {
   const p = s.mem_parts;
   const used = numv(s.mem_used);
-  // 颜色只用一个强调色 + 四档灰：面板的约束是单调色系，
-  // 五块彩色会把「实际占用」这个主次关系冲淡。
+  // 颜色只用一个强调色 + 三档灰：面板的约束是单调色系，
+  // 四块彩色会把「实际占用」这个主次关系冲淡。
   const parts = [
     { key: "anon", name: "进程匿名", v: numv(p.anon), color: "var(--accent)",
       hint: "堆、栈、Go heap：所有进程加总，不只前 5" },
@@ -374,10 +381,8 @@ function memPartsBlock(s) {
       hint: "没有 swap 时收不回来，所以算实际占用" },
     { key: "kernel", name: "内核", v: numv(p.kernel), color: "#98a3b8",
       hint: "不可回收 slab、内核栈、页表" },
-    { key: "cold", name: "页缓存（暂不可回收）", v: numv(p.cold_cache), color: "#b4bece",
-      hint: "页缓存里内核没算进 MemAvailable 的部分：块设备元数据页、被映射钉住的页。内存紧张时仍可能被收回，所以它是「实际」里最软的一块" },
-    { key: "other", name: "其它", v: numv(p.other), color: "#d5dae4",
-      hint: "per-cpu、vmalloc、驱动缓冲等" },
+    { key: "other", name: "其它", v: numv(p.other), color: "#b4bece",
+      hint: "per-cpu、vmalloc、驱动缓冲、预留等没被单独统计的内核分配" },
   ].filter((x) => x.v > 0);
   if (!parts.length) return [];
 
@@ -396,15 +401,30 @@ function memPartsBlock(s) {
     el("span", { class: "mp-share", text: pct(x.v, used) + "%" }),
   ]));
 
-  return [
+  const out = [
     el("div", { class: "mp-head" }, [
       el("span", { text: "实际 " + fmtBytes(used) + " 的构成" }),
-      // 三档的口径写在这里：用户拿 free -m 对照时最容易卡住的就是这个数
-      el("span", { class: "mp-sub", text: "空闲 " + fmtBytes(numv(s.mem_free)) }),
+      // 三档的口径写在这里：用户拿 free -m / htop 对照时最容易卡住的就是这个数。
+      // 只写整 MB：这行要和左边的标题抢宽度，带一位小数会把标题挤成省略号。
+      el("span", {
+        class: "mp-sub",
+        text: "可回收 " + mbRough(s.mem_cache) + " · 空闲 " + mbRough(s.mem_free),
+      }),
     ]),
     el("div", { class: "mp-bar" }, segs),
     ...rows,
   ];
+
+  // 「实际」不再等于「还能撑多少」：内核估的可用量比它大，差额是压掉页缓存
+  // 能腾出来的空间。两个数都要给，否则用户会觉得面板在自相矛盾。
+  const avail = numv(s.mem_available);
+  if (avail > used) {
+    out.push(el("div", {
+      class: "mp-note",
+      text: "内核估算可用 " + fmtBytes(avail) + "：回收页缓存后还能分出来的量，比上面的「实际」宽松",
+    }));
+  }
+  return out;
 }
 
 function memTipBody(data) {
@@ -433,7 +453,8 @@ function memTipBody(data) {
       "PID " + it.pid + " · 占内存 " + (it.mem_pct || 0).toFixed(1) + "%"));
   }
 
-  // 前 5 名之外的进程。不写这一行，「313 vs 133」就始终对不上账。
+  // 前 5 名之外的进程。不写这一行，用户会以为剩余的量都凭空没了。
+  // 但 RSS 之和会重复计入共享库，通常还大于「实际占用」，所以这句提醒必不可少。
   const sum = numv(data.proc_rss_sum);
   const count = numv(data.proc_count);
   if (count > items.length && sum > 0) {
@@ -441,7 +462,7 @@ function memTipBody(data) {
     for (const it of items) top += numv(it.rss);
     nodes.push(el("div", {
       class: "top-foot",
-      text: "其余 " + (count - items.length) + " 个进程合计 " + fmtBytes(Math.max(0, sum - top)) + "（RSS 相加，含共享页）",
+      text: "其余 " + (count - items.length) + " 个进程合计 " + fmtBytes(Math.max(0, sum - top)) + "（RSS 相加、含共享页，比实际占用偏大）",
     }));
   } else {
     nodes.push(el("div", { class: "top-foot", text: "RSS 会重复计算共享页，不应与上面的实际占用直接相减" }));
@@ -929,12 +950,16 @@ function tableNoticeRow(text, cols, action) {
   return el("tr", {}, [cell]);
 }
 
-// 内存卡片的明细行：色点 + 「实际占用 / 缓存 / 空闲」三个数。
+// 内存卡片的明细行：色点 + 「实际占用 / 可回收 / 空闲」三个数。
 //
 // 只写「已用 / 总量」是不够的：内核会把空闲内存大量拿去做页缓存，
 // 于是同一条曲线在升级面板、解压大文件之后会突然抬起来，看着像泄漏。
 // 把可回收的缓存单独标出来，用户才能判断「要不要动手」——
 // 缓存高不用管，实际占用高才要查。
+//
+// 三档与 htop / free(1) 同口径：实际 = 总量 - 空闲 - 可回收，所以面板上的
+// 数字和 SSH 里看到的一致。曾经用过「总量 - MemAvailable」，同一台机器会
+// 比 htop 多报 150MB（那块是页缓存），对不上账。
 // 内存水位：决定进度条与图例色点的颜色档位（图例必须跟着条走，
 // 否则会出现「条是红的、图例圆点还是靛蓝」这种自相矛盾的画面）。
 function memLevel(s) {
@@ -953,8 +978,7 @@ function memLegend(s) {
     el("i", { class: "lg-dot " + cls }), el("span", { text }),
   ]);
   const items = [item("used " + level, "实际 " + fmtBytes(used))];
-  // 这一档是「可用 - 空闲」，含可回收 slab，所以叫「可回收」而不是「缓存」：
-  // 全量页缓存里有一块内核不认，那部分已经算进「实际」了。
+  // 这一档就是 `free` 的 buff/cache（已扣 tmpfs，它没有 swap 收不回来）
   if (cache > 0) items.push(item("cache", "可回收 " + fmtBytes(cache)));
   items.push(item("free", "空闲 " + fmtBytes(free)));
   items.push(el("span", { class: "lg-total", text: (s.container ? "限额 " : "共 ") + fmtBytes(total) }));

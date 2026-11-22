@@ -11,46 +11,65 @@ README 只讲「能做什么」，本文讲「做到什么程度、为什么这�
 
 ## 内存口径
 
-概览把内存切成三档，三档必然满足 `实际 + 可回收 + 空闲 = 总量`：
+概览把内存切成三档，全部来自 `/proc/meminfo` 的直接计数，不做估算，三档必然满足
+`实际 + 可回收 + 空闲 = 总量`：
 
 | 档 | 算法 | 含义 |
 |---|---|---|
-| 实际 | `MemTotal - MemAvailable` | 真占住了、要回收就得动手的量 |
-| 可回收 | `MemAvailable - MemFree` | 内核认为能收回来还给应用的部分（页缓存 + 可回收 slab） |
-| 空闲 | `MemFree` | 真正没人用的页，与 `free(1)` 的 free 列一致 |
+| 实际 | `总量 - 空闲 - 可回收` | 丢掉页缓存、换出 swap 之后仍然占着的量，与 htop 顶部那条 Mem、`free` 的 used 列同口径 |
+| 可回收 | `Buffers + Cached + SReclaimable - Shmem` | `free` 的 buff/cache。内存一紧张就被内核丢掉，不算谁占着 |
+| 空闲 | `MemFree` | 真正没人用的页，与 `free` 的 free 列一致 |
 
-早先「缓存」取 `Cached + Buffers + SReclaimable - Shmem`、「空闲」用减法推，两列会打架：
-页缓存里有一部分页内核不会算进 `MemAvailable`（块设备元数据页、被映射钉住的页），
-它既算在「实际」里、又被全量缓存算一遍，同一块内存记了两次。现场一台 960MB 的机器上
-`free -m` 报空闲 327MB，面板只敢报 171MB。现在空闲直接取 `MemFree`，可回收取两者之间
-余下的部分，差额另存为「页缓存（暂不可回收）」放进「实际」的构成里。
+tmpfs 要从可回收里扣掉：没有 swap 时它收不回来，只能算实际占用。
 
-> `free -m` 的三列同样不能相加：它的 used 是 `总量 - available`，buff/cache 却是全量缓存，
-> 现场那台 `291 + 327 + 499 = 1117 > 960`。这不是内存泄漏，是两列口径不同。面板做的是严格三分。
+**为什么不写「实际 = 总量 - MemAvailable」。** `MemAvailable` 是内核对「还能分给新进程
+多少」的*保守估计*，它会按 `min(页缓存/2, 水位)` 从缓存里扣掉一块当作「不一定收得回来」。
+那块内存其实还是页缓存，内存一紧就没了，并没有谁占着。于是缓存越多、机器越空，这个
+公式高估得越厉害——现场一台 960MB 的机器上：
 
-**「实际」为什么远大于前 5 名进程之和？** 因为这个数是全机的，而进程排行只列头部：
+```
+htop 顶部      Mem 138M/960M          ← 实际占用
+free -m        used 291  free 327  buff/cache 499  available 668
+旧算法         实际 = 960 - 668 = 292MB   ← 多出 154MB，全是页缓存
+```
+
+少报空闲那 150MB 只是症状，真正的毛病是「实际占用」被高估，用户会去查根本不存在的泄漏，
+或者干脆加内存。所以 0.4.8 起改成上面这套，面板上的数字与 SSH 里 `htop` / `free` 一致。
+
+代价是「实际」不再等于「一定不会再 OOM 的安全垫」。那个问题用 `MemAvailable` 回答：
+它单独显示在内存浮层的底部（「内核估算可用 668 MB」），软件商店的装前拦截也用它
+（`internal/sysinfo.MemAvailable`）——保守的量适合判断「还能不能装下」，不适合回答
+「谁占了内存」。
+
+容器口径本来就是这个算法（`memory.current - (file - shmem)`），两条路径现在同义。
+cgroup 没有 `MemAvailable` 的对应项，容器里不显示那行说明。
+
+**「实际」里都是谁？** 页缓存不在里面，剩下的四块：
 
 | 构成 | 来源（`/proc/meminfo`） | 说明 |
 |---|---|---|
 | 进程匿名 | `AnonPages` | 堆、栈、Go heap、`mmap(MAP_ANON)`，**所有进程**加总 |
 | tmpfs / 共享内存 | `Shmem` | 无 swap 收不回，所以算实际占用 |
-| 内核 | `SUnreclaim + KernelStack + PageTables` | slab、内核栈、页表 |
-| 页缓存（暂不可回收） | 全量缓存 - 可回收 | 内核不肯算进 available 的那部分缓存，实测常是最大的一块 |
-| 其它 | 余项 | per-cpu、vmalloc、驱动缓冲等 |
+| 内核 | `SUnreclaim + KernelStack + PageTables + Percpu + SecPageTables + VmallocUsed` | 不可回收 slab、内核栈、页表、per-cpu 分配器、vmalloc 区 |
+| 其它 | 余项 | `KReclaimable` 里非 slab 的部分、驱动与固件预留、预分配的 HugePages 等没被 meminfo 单列的分配 |
 
 容器口径下这几项改读 `memory.stat`（`anon` / `shmem` / `slab_unreclaimable`），
 因为 `/proc/meminfo` 在容器里报的是宿主机的数。
 
 还有一处容易误会：**RSS 会重复计算共享页**（每个进程都把自己映射到的共享库算进
-自己的 RSS），所以「所有进程 RSS 之和」不能和「实际占用」直接相减。它只适合回答
-「前 5 之外的那些进程大概占多少」。实测一台机器上 RSS 合计 181MB、`AnonPages` 只有 56MB，
-差的 125MB 就是被各进程重复计入的共享页。
+自己的 RSS），所以「所有进程 RSS 之和」不能和「实际占用」直接相减。实测一台机器上
+前 5 名进程 RSS 合计 76MB、RSS 总和 181MB，而 `AnonPages` 只有 56MB——差的 100MB
+就是被各进程重复计入的共享页。RSS 只适合回答「前 5 之外的那些进程大概占多少」。
 
 排查用的命令：
 
 ```bash
 free -m
-grep -E 'MemTotal|MemAvailable|MemFree|Buffers|Cached|SReclaimable|Shmem|AnonPages|SUnreclaim|KernelStack|PageTables' /proc/meminfo
+htop                     # 顶部 Mem 条：实际占用，与概览的数字应当一致
+grep -E 'MemTotal|MemFree|MemAvailable|Buffers|Cached|SReclaimable|Shmem|AnonPages|SUnreclaim|KernelStack|PageTables' /proc/meminfo
+# 「其它」偏大时，这一条能钉死它是什么（预留的 HugePages 最常被漏掉：
+# 它既不在 MemFree、也不在 Anon/Cached/Slab 里，却实打实占着内存）
+grep -E '^(Slab|KReclaimable|Percpu|VmallocUsed|Mlocked|Unevictable|SecPageTables|HugePages_Total|Hugepagesize)' /proc/meminfo
 ps -eo rss= | awk '{s+=$1} END {printf "所有进程 RSS 合计 %.0f MB\n", s/1024}'
 sudo slabtop -o -s c | head -12
 ```

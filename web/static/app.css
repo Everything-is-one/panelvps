@@ -282,7 +282,9 @@ p.sub { color: var(--muted); margin: 6px 0 0; font-size: 13.5px; line-height: 1.
 .legend .lg-dot.used.warn { background: #f79009; }
 .legend .lg-dot.used.crit { background: var(--danger); }
 .legend .lg-dot.cache { background: var(--cache); }
-.legend .lg-dot.free { background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--border-strong); }
+/* 空闲用「空心点」：它在进度条上就是底色，实心点填什么颜色都会和条错位；
+ * 但描边要用能看见的灰，太浅在白卡片上等于没有（实测 7px 就消失了）。 */
+.legend .lg-dot.free { background: transparent; box-shadow: inset 0 0 0 1.5px var(--muted-2); }
 .legend .lg-total { color: var(--muted-2); }
 
 .row { display: flex; gap: 10px; align-items: center; }
@@ -859,13 +861,15 @@ table.files tr.row-up td { padding-top: 10px; padding-bottom: 10px; background: 
  * 这里要表达的是「哪一块占大头」，不是让四块并列抢注意力。
  */
 .mp-head {
-  display: flex; align-items: baseline; gap: 8px;
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
   font-size: 11.5px; color: var(--muted); letter-spacing: .02em;
   font-variant-numeric: tabular-nums;
 }
-/* 三档口径的对照值：贴右侧，弱于标题，但保证能一眼对着 free -m 核 */
+/* 三档口径的对照值：贴右侧，弱于标题，但保证能一眼对着 free -m 核。
+ * 标题宁可不缩（放不下就让副标题换行），否则「实际 138.0 MB 的…」这种
+ * 半句话比换行难看得多。 */
 .mp-head > span { white-space: nowrap; }
-.mp-head > span:first-child { overflow: hidden; text-overflow: ellipsis; }
+.mp-head > span:first-child { flex: 0 0 auto; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .mp-head .mp-sub { margin-left: auto; color: var(--muted-2); }
 .mp-bar {
   display: flex; height: 6px; border-radius: 999px; overflow: hidden;
@@ -885,6 +889,10 @@ table.files tr.row-up td { padding-top: 10px; padding-bottom: 10px; background: 
 .mp-val { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
 .mp-share { width: 40px; text-align: right; color: var(--muted-2); font-variant-numeric: tabular-nums; }
 .mp-sep { height: 1px; background: var(--border); margin: 12px 0 9px; }
+/* 与「实际」并列的另一个口径：内核估算可用。
+ * 两个数不冲突（差额是压掉页缓存能腾出来的空间），但必须写一句，
+ * 否则用户会觉得面板自己在打架。 */
+.mp-note { margin-top: 8px; font-size: 11.5px; line-height: 1.5; color: var(--muted-2); }
 
 /* ---------- 磁盘占用明细 ---------- */
 
