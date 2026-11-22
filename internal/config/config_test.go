@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // 0.3.0 的 SetAccess 会把整份配置写回文件，backup_dir 从此固化成
@@ -187,5 +189,131 @@ func TestPatchScalar(t *testing.T) {
 	}
 	if strings.Contains(got, "terminal_enabled: false") {
 		t.Errorf("旧值没有被替换：\n%s", got)
+	}
+}
+
+// 改 ssh_ports 必须替换整块。
+//
+// 这是 0.4.8 那次「升级完面板起不来」的直接原因：yaml.Marshal 把 []int{22}
+// 写成两行（ssh_ports: / - 22），PatchScalar 只换了第一行，留下孤儿列表项，
+// 整份配置变成非法 YAML。写入当时不报错——进程还在跑、配置在内存里，
+// 直到下次重启才炸，日志里只有「yaml: line 24: did not find expected key」。
+func TestPatchScalarRewritesListBlock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "panel.yaml")
+	c := Default()
+	body, err := yaml.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "ssh_ports:\n    - 22") {
+		t.Fatalf("前置条件变了，marshal 结果里没有多行列表：\n%s", body)
+	}
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := PatchScalar(path, "ssh_ports", "[2222]"); err != nil {
+		t.Fatalf("改写失败: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "- 22") {
+		t.Errorf("旧列表项没被清掉：\n%s", raw)
+	}
+
+	var back Config
+	if err := yaml.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("改写后无法解析: %v\n%s", err, raw)
+	}
+	if len(back.SSHPorts) != 1 || back.SSHPorts[0] != 2222 {
+		t.Fatalf("ssh_ports = %v，期望 [2222]", back.SSHPorts)
+	}
+}
+
+// 配置文件本身已经坏了时，PatchScalar 必须拒绝写入并原样保留文件。
+// 否则「改个设置」会把最后的现场也毁掉。
+func TestPatchScalarRefusesBrokenFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "panel.yaml")
+	broken := "listen: 127.0.0.1:20873\nssh_ports: [2222]\n    - 22\n"
+	if err := os.WriteFile(path, []byte(broken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := PatchScalar(path, "terminal_enabled", "true"); err == nil {
+		t.Fatal("对已损坏的配置应当拒绝写入")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != broken {
+		t.Fatalf("文件被改动了：\n%s", raw)
+	}
+}
+
+// 键不存在时追加到末尾，且不破坏已有的嵌套结构。
+func TestPatchScalarAppendsMissingKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "panel.yaml")
+	if err := os.WriteFile(path, []byte("listen: 127.0.0.1:20873\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PatchScalar(path, "access_path", `"secret"`); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if !strings.Contains(string(raw), "access_path: \"secret\"") {
+		t.Fatalf("没写进去：\n%s", raw)
+	}
+	var back Config
+	if err := yaml.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("追加后无法解析: %v", err)
+	}
+	if back.AccessPath != "secret" {
+		t.Fatalf("AccessPath = %q", back.AccessPath)
+	}
+}
+
+// 解析失败要把出错行和邻居打出来，而不是只给一个行号。
+func TestLoadParseErrorShowsContext(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "panel.yaml")
+	body := strings.Join([]string{
+		"listen: 127.0.0.1:20873",
+		"data_dir: ./data",
+		"ssh_ports: [2222]",
+		"    - 22",
+		"update_repo: Everything-is-one/panelvps",
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("非法配置应当报错")
+	}
+	msg := err.Error()
+	for _, want := range []string{"第 3 行附近", "→ ", "ssh_ports: [2222]", "- 22", "孤儿"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("报错里缺少 %q：\n%s", want, msg)
+		}
+	}
+}
+
+// Check 不创建文件、不改文件，只回答「能不能启动」。
+func TestCheckDoesNotCreateFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "panel.yaml")
+	if err := Check(path); err == nil {
+		t.Fatal("文件不存在时 Check 应当报错")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("Check 不应创建配置文件")
 	}
 }

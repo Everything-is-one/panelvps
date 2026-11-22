@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -150,7 +151,7 @@ func Load(path string) (*Config, error) {
 	raw, err := os.ReadFile(path)
 	switch {
 	case err == nil:
-		if err := yaml.Unmarshal(raw, cfg); err != nil {
+		if err := decode(raw, cfg); err != nil {
 			return nil, fmt.Errorf("解析配置 %s 失败: %w", path, err)
 		}
 	case errors.Is(err, os.ErrNotExist):
@@ -166,6 +167,113 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// Check 只读地解析并校验配置文件，不创建、不修改任何东西。
+//
+// 给 CLI（panelvps check）和安装脚本用：服务启动失败时会无限重启，
+// 而日志里只有一行「yaml: line 24: did not find expected key」，
+// 既不说第 24 行是什么，也不说该改哪里。启动前先跑一遍这个，
+// 就能把出错行连同上下文一起打出来再停手。
+func Check(path string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读取配置 %s 失败: %w", path, err)
+	}
+	cfg := Default()
+	cfg.path = path
+	cfg.baseDir = baseDirFor(path)
+	if err := decode(raw, cfg); err != nil {
+		return fmt.Errorf("解析配置 %s 失败: %w", path, err)
+	}
+	cfg.applyDefaults()
+	return cfg.Validate()
+}
+
+// decode 解析配置，语法错误时把出错行前后的原文一并带出来。
+func decode(raw []byte, cfg *Config) error {
+	if err := yaml.Unmarshal(raw, cfg); err != nil {
+		return &parseError{err: err, ctx: contextAround(raw, err.Error())}
+	}
+	return nil
+}
+
+// parseError 让「第 N 行」这种只有行号的报错带上上下文。
+type parseError struct {
+	err error
+	ctx string
+}
+
+func (e *parseError) Error() string {
+	if e.ctx == "" {
+		return e.err.Error()
+	}
+	return e.err.Error() + "\n" + e.ctx
+}
+
+func (e *parseError) Unwrap() error { return e.err }
+
+// yamlLineRe 从 yaml.v3 的报错里取行号。
+//
+// 它的措辞有两类：解析错误是「yaml: line 24: ...」，类型错误是
+// 「yaml: unmarshal errors:\n  line 3: cannot unmarshal ...」，都带 "line N:"。
+var yamlLineRe = regexp.MustCompile(`line (\d+):`)
+
+func yamlLine(raw []byte, msg string) int {
+	m := yamlLineRe.FindStringSubmatch(msg)
+	if len(m) != 2 {
+		return 0
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0
+	}
+	lines := strings.Count(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
+	if n < 1 || n > lines {
+		return 0
+	}
+	return n
+}
+
+// contextAround 打印出错行 ± 2 行，并把出错行标出来。
+func contextAround(raw []byte, msg string) string {
+	line := yamlLine(raw, msg)
+	if line == 0 {
+		return ""
+	}
+	lines := strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
+
+	from, to := line-2, line+2
+	if from < 1 {
+		from = 1
+	}
+	if to > len(lines) {
+		to = len(lines)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "第 %d 行附近：\n", line)
+	for i := from; i <= to; i++ {
+		mark := "    "
+		if i == line {
+			mark = "  → "
+		}
+		fmt.Fprintf(&b, "%s%3d | %s\n", mark, i, lines[i-1])
+	}
+
+	// 已知的两种成因给具体改法，其余给通用提示。
+	cur := strings.TrimRight(lines[line-1], " ")
+	if strings.HasPrefix(cur, "ssh_ports:") && strings.Contains(cur, "[") && line < len(lines) {
+		next := strings.TrimRight(lines[line], " ")
+		if strings.HasPrefix(strings.TrimSpace(next), "- ") {
+			b.WriteString("  下一行的列表项属于同一份配置：ssh_ports 改成单行写法后它就成了孤儿。\n")
+			b.WriteString("  改法一：删掉那一行列表项；改法二：把两行合并成\n")
+			b.WriteString("    ssh_ports:\n      - 2222\n")
+			return b.String()
+		}
+	}
+	b.WriteString("  常见原因：缩进对齐错了、用 Tab 代替了空格、值里有未加引号的冒号或换行。\n")
+	return b.String()
 }
 
 // baseDirFor 推导「相对路径的基准目录」。
@@ -450,26 +558,72 @@ func (c *Config) Path() string { return c.path }
 // 不要用 Save 做运行期的小改动：Save 写的是内存里的 cfg，而 Validate 已经把
 // data_dir、backup_dir 这些相对路径解析成绝对路径，写回去就会把「./data」
 // 固化成「/root/data」——0.3.0 那次线上故障就是这么来的。
+//
+// 替换的是**整块**，不只是键所在的那一行：yaml.Marshal 把 []int{22} 写成
+//
+//	ssh_ports:
+//	    - 22
+//
+// 只替换第一行会得到「ssh_ports: [2222]」+ 一行孤儿「- 22」，整份配置当场
+// 变成非法 YAML。而这个键恰恰是最常被改的（改 SSH 端口）。更要命的是当时
+// 进程还在跑、配置在内存里，写入不报错、也没人重新解析，于是故障被推迟到
+// 下一次重启——用户看到的是「升级完面板起不来了」，跟改端口八竿子打不着。
+//
+// 所以这里两道保险：整块替换，以及写前自检（改完解析不了就放弃，原文件不动）。
 func PatchScalar(path, key, literal string) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	lines := strings.Split(string(raw), "\n")
+	out, err := patchScalarBytes(raw, key, literal)
+	if err != nil {
+		return err
+	}
+	// 写前自检：语法错、类型错都拦住。文件本来就已经坏了的话这里也会失败，
+	// 那是应该的——先修好再改设置，别在伤口上再补一刀。
+	var probe any
+	if err := yaml.Unmarshal(out, &probe); err != nil {
+		return fmt.Errorf("改写 %s 会让配置无法解析（%v），已放弃写入，文件保持原样", key, err)
+	}
+	return os.WriteFile(path, out, 0o600)
+}
+
+// patchScalarBytes 把 key 这一整块（键行 + 从属的缩进行/列表项）换成单行。
+func patchScalarBytes(raw []byte, key, literal string) ([]byte, error) {
+	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	lines := strings.Split(text, "\n")
 	prefix := key + ":"
-	found := false
+	replacement := key + ": " + literal
+
 	for i, line := range lines {
-		// 只替换顶层键：缩进行属于嵌套结构，不能碰
-		if strings.HasPrefix(line, prefix) {
-			lines[i] = key + ": " + literal
-			found = true
+		// 只认顶层键：缩进行属于嵌套结构，不能碰
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		// 找出这一块的结尾：紧随其后的缩进行、以及从同一行开始写的列表项
+		end := i + 1
+		for end < len(lines) {
+			t := strings.TrimRight(lines[end], " \t")
+			if t == "" {
+				break // 空行是分隔，不属于这一块
+			}
+			if strings.HasPrefix(t, " ") || strings.HasPrefix(t, "\t") ||
+				t == "-" || strings.HasPrefix(t, "- ") {
+				end++
+				continue
+			}
 			break
 		}
+		out := make([]string, 0, len(lines)-(end-i)+1)
+		out = append(out, lines[:i]...)
+		out = append(out, replacement)
+		out = append(out, lines[end:]...)
+		return []byte(strings.Join(out, "\n")), nil
 	}
-	if !found {
-		lines = append(lines, key+": "+literal)
-	}
-	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o600)
+
+	// 没有这个键：追加到末尾，保持文件以换行结尾
+	trimmed := strings.TrimRight(text, "\n")
+	return []byte(trimmed + "\n" + replacement + "\n"), nil
 }
 
 // IsLoopback 判断当前监听是否只对本机开放。// 首页与安装脚本据此决定是否提示「面板已暴露在公网」。
