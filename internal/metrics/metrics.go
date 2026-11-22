@@ -30,15 +30,18 @@ type Snapshot struct {
 	Supported  bool    `json:"supported"`
 	PanelRSS   uint64  `json:"panel_rss"`
 	Goroutines int     `json:"goroutines"`
-	// MemCache 是「可回收的页缓存」，不计入 MemUsed。cgroup 口径下取
-	// memory.stat 的 file 减 tmpfs 的 shmem；宿主机口径下取
-	// Cached + Buffers + SReclaimable - Shmem。单独带出来是为了让概览能
-	// 写清「已用 + 缓存 + 空闲 = 总量」，不至于把升级时写盘产生的缓存
-	// 当成内存泄漏。
+	// MemCache 是「内核认为能收回来」的那部分，不计入 MemUsed。
+	//
+	// 宿主机口径取 MemAvailable - MemFree，不是 meminfo 的
+	// Cached + Buffers + SReclaimable - Shmem。两者差得可能很远：页缓存里
+	// 有一部分（块设备元数据页、被映射钉住的页）内核不会算进 available，
+	// 于是它既在「实际」里、又在全量缓存里，同一块内存被记两次，
+	// 「空闲」被压掉一大截（实测少报 150MB）。
+	//
+	// cgroup 口径取 memory.stat 的 file 减 shmem。
 	MemCache uint64 `json:"mem_cache"`
-	// MemFree 是扣掉缓存之后真正闲置的部分（total - used - cache），
-	// 不是 /proc/meminfo 的 MemFree——后者把页缓存也算作空闲，会让人
-	// 以为内存一直很宽裕。
+	// MemFree 是真正闲置的页，直接取 meminfo 的 MemFree，与 free(1) 的
+	// free 列一致。三档满足 实际 + 缓存 + 空闲 = 总量。
 	MemFree uint64 `json:"mem_free"`
 	// Container 表示内存与 CPU 数据来自 cgroup 限额而非宿主机 /proc。
 	// LXC 默认不挂 lxcfs 时，/proc 报的是宿主机数据，必须用 cgroup 纠正。
@@ -52,7 +55,7 @@ type Snapshot struct {
 	MemParts *MemParts `json:"mem_parts,omitempty"`
 }
 
-// MemParts 是「实际占用」的构成，四项之和等于 MemUsed。
+// MemParts 是「实际占用」的构成，各项之和等于 MemUsed。
 type MemParts struct {
 	// Anon 进程匿名页：堆、栈、Go heap、mmap(MAP_ANON)。所有进程加总，不只前 5。
 	Anon uint64 `json:"anon"`
@@ -60,6 +63,12 @@ type MemParts struct {
 	Shmem uint64 `json:"shmem"`
 	// Kernel 不可回收的内核内存：slab（SUnreclaim）+ 内核栈 + 页表。
 	Kernel uint64 `json:"kernel"`
+	// ColdCache 全量页缓存里内核没算进 MemAvailable 的部分。
+	//
+	// 它是「实际占用」的常客：实测一台 960MB 的小机器上 300MB 实际占用里
+	// 有 150MB 是这块，比所有进程加起来还多。不单列出来的话，这些量全被
+	// 兜进 Other，而 Other 的说明是 per-cpu / vmalloc——对不上账。
+	ColdCache uint64 `json:"cold_cache"`
 	// Other 余项：per-cpu、vmalloc、驱动缓冲、预留等，通常不大。
 	Other uint64 `json:"other"`
 }
@@ -226,8 +235,8 @@ func (c *Collector) cpuPercentLocked() float64 {
 type memStats struct {
 	Total     uint64
 	Used      uint64 // 实际占用：总量 - MemAvailable
-	Cache     uint64 // 可回收页缓存
-	Free      uint64 // 真正闲置：总量 - 占用 - 缓存
+	Cache     uint64 // 可回收：MemAvailable - MemFree
+	Free      uint64 // 真正闲置：MemFree
 	SwapTotal uint64
 	SwapUsed  uint64
 
@@ -235,13 +244,26 @@ type memStats struct {
 	Anon   uint64 // AnonPages
 	Shmem  uint64 // Shmem（tmpfs / 共享内存）
 	Kernel uint64 // SUnreclaim + KernelStack + PageTables
+	// Cold 全量页缓存里没被算进 MemAvailable 的差额，同样落在 Used 里。
+	Cold uint64
 }
 
 // parts 把 memStats 里的构成转成对外结构，余项兜在 Other 里。
 func (m memStats) parts() *MemParts {
-	p := &MemParts{Anon: m.Anon, Shmem: m.Shmem, Kernel: m.Kernel}
-	sum := p.Anon + p.Shmem + p.Kernel
-	if sum < m.Used {
+	anon, shmem, kernel, cold := m.Anon, m.Shmem, m.Kernel, m.Cold
+
+	if sum := anon + shmem + kernel + cold; sum > m.Used && sum > 0 {
+		// MemAvailable 的估算会让 Used 偏小；按比例压到 Used 以内，
+		// 否则前端会出现「构成比总数还大」这种一眼假的数据。
+		// 最后一项取余数，避免整除截断让各项之和差几个字节。
+		anon = m.Used * anon / sum
+		shmem = m.Used * shmem / sum
+		kernel = m.Used - anon - shmem
+		cold = 0 // 数据自相矛盾时宁可少报一项，也不凭空编数
+	}
+
+	p := &MemParts{Anon: anon, Shmem: shmem, Kernel: kernel, ColdCache: cold}
+	if sum := anon + shmem + kernel + cold; sum < m.Used {
 		p.Other = m.Used - sum
 	}
 	return p
@@ -255,20 +277,22 @@ func memInfo() memStats {
 	return parseMemInfo(string(raw))
 }
 
-// parseMemInfo 把 /proc/meminfo 的内容拆成「实际占用 / 可回收缓存 / 空闲」。
+// parseMemInfo 把 /proc/meminfo 的内容拆成「实际占用 / 可回收 / 空闲」。
 //
-// 为什么不用 MemFree 当空闲：内核会拿空闲内存去做页缓存，MemFree 长期只剩
-// 几十 MB，机器明明没事却像要爆了。所以沿用
+// 三档都以 MemAvailable 为锚，而不是自己拿 Cached 去拼：
 //
-//	已用 = 总量 - MemAvailable
+//	实际 = 总量 - MemAvailable
+//	空闲 = MemFree
+//	可回收 = 总量 - 实际 - 空闲  （即 MemAvailable - MemFree）
 //
-// 再把可回收的那部分单独摘出来放在中间一档：
+// 早先「缓存」取 Cached + Buffers + SReclaimable - Shmem、「空闲」用减法推，
+// 两者会打架：页缓存里有一部分内核不认（块设备元数据页、被映射钉住的页），
+// 它既算在「实际」里、又被全量缓存算一遍，同一块内存记了两次，空闲被压掉
+// 一大截。现场一台 960MB 的机器上，free(1) 报空闲 327MB，面板只敢报 171MB。
 //
-//	缓存 = Cached + Buffers + SReclaimable - Shmem
-//	空闲 = 总量 - 已用 - 缓存
-//
-// 减 Shmem 是因为 tmpfs 占住的页在没有 swap 时收不回来，算进「可回收」
-// 会让人以为随时能还（与 cgroup 口径的 file - shmem 保持一致）。
+// 现在空闲直接取 MemFree（与 free 的 free 列一致），可回收取两者之间余下
+// 的部分，必然满足 实际 + 可回收 + 空闲 = 总量。全量缓存与它的差额另存
+// Cold，由 parts() 放到「实际」的构成里，不再凭空消失。
 func parseMemInfo(raw string) memStats {
 	vals := parseMeminfoVals(raw)
 
@@ -280,37 +304,48 @@ func parseMemInfo(raw string) memStats {
 		// 3.14 之前的内核没有 MemAvailable，退回旧公式
 		avail = vals["MemFree"] + vals["Buffers"] + vals["Cached"]
 	}
-	if m.Total > avail {
-		m.Used = m.Total - avail
+	if avail > m.Total {
+		avail = m.Total
 	}
+	m.Used = m.Total - avail
 
-	cache := vals["Cached"] + vals["Buffers"] + vals["SReclaimable"]
-	if shm := vals["Shmem"]; shm < cache {
-		cache -= shm
+	// 全部页缓存（含可回收 slab）。tmpfs 在没有 swap 时收不回来，
+	// 所以减掉 Shmem，与 cgroup 口径的 file - shmem 保持一致。
+	cacheAll := vals["Cached"] + vals["Buffers"] + vals["SReclaimable"]
+	if shm := vals["Shmem"]; shm < cacheAll {
+		cacheAll -= shm
 	} else {
-		cache = 0
+		cacheAll = 0
 	}
-	// MemAvailable 的估算偏保守，used 有可能把一部分本该算缓存的页也
-	// 算进去；不夹一下会出错负数（uint64 下直接变成天文数字）。
-	if cache > m.Total-m.Used {
-		cache = m.Total - m.Used
-	}
-	m.Cache = cache
-	m.Free = m.Total - m.Used - m.Cache
 
-	// 「实际占用」的构成。四项之和略小于 Used 是正常的：剩余部分是 per-cpu、
-	// vmalloc、驱动私有缓冲这类没有独立 meminfo 字段的东西，统一记到 Other。
+	if free, ok := vals["MemFree"]; ok {
+		// 空闲不能超过「可用」——超过说明 meminfo 自相矛盾。
+		if free > m.Total-m.Used {
+			free = m.Total - m.Used
+		}
+		m.Free = free
+		m.Cache = m.Total - m.Used - m.Free
+		// 缓存里内核不认的那部分：它就是 Used 的一部分，不可能超过 Used。
+		if cacheAll > m.Cache {
+			cold := cacheAll - m.Cache
+			if cold > m.Used {
+				cold = m.Used
+			}
+			m.Cold = cold
+		}
+	} else {
+		// 裁剪过的 meminfo 没有 MemFree：退回减法，冷缓存无从判断。
+		if cacheAll > m.Total-m.Used {
+			cacheAll = m.Total - m.Used
+		}
+		m.Cache = cacheAll
+		m.Free = m.Total - m.Used - m.Cache
+	}
+
+	// 「实际占用」的构成，余项由 parts() 兜到 Other。
 	m.Anon = vals["AnonPages"]
 	m.Shmem = vals["Shmem"]
 	m.Kernel = vals["SUnreclaim"] + vals["KernelStack"] + vals["PageTables"]
-	if sum := m.Anon + m.Shmem + m.Kernel; sum > m.Used && sum > 0 {
-		// MemAvailable 的估算会让 Used 偏小；按比例压到 Used 以内，
-		// 否则前端会出现「构成比总数还大」这种一眼假的数据。
-		// 最后一项取余数，避免整除截断让四项之和差几个字节。
-		m.Anon = m.Used * m.Anon / sum
-		m.Shmem = m.Used * m.Shmem / sum
-		m.Kernel = m.Used - m.Anon - m.Shmem
-	}
 
 	m.SwapTotal = vals["SwapTotal"]
 	if m.SwapTotal > vals["SwapFree"] {

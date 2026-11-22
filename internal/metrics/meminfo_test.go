@@ -25,13 +25,13 @@ SwapFree:         262144 kB
 	if want := uint64(848000) * kb; m.Used != want {
 		t.Fatalf("Used = %d, want %d（总量 - MemAvailable）", m.Used, want)
 	}
-	// 700000 + 50000 + 40000 - 20000
-	if want := uint64(770000) * kb; m.Cache != want {
-		t.Fatalf("Cache = %d, want %d（Cached+Buffers+SReclaimable-Shmem）", m.Cache, want)
+	// 空闲直接取 MemFree，与 free(1) 的 free 列对齐
+	if want := uint64(200000) * kb; m.Free != want {
+		t.Fatalf("Free = %d, want %d（MemFree）", m.Free, want)
 	}
-	// 2048000 - 848000 - 770000
-	if want := uint64(430000) * kb; m.Free != want {
-		t.Fatalf("Free = %d, want %d（总量 - 占用 - 缓存）", m.Free, want)
+	// 可回收 = MemAvailable - MemFree = 1200000 - 200000
+	if want := uint64(1000000) * kb; m.Cache != want {
+		t.Fatalf("Cache = %d, want %d（可用 - 空闲）", m.Cache, want)
 	}
 	if m.Used+m.Cache+m.Free != m.Total {
 		t.Fatalf("三档之和 %d != 总量 %d", m.Used+m.Cache+m.Free, m.Total)
@@ -57,16 +57,16 @@ Cached:           400000 kB
 	if want := uint64(450000) * kb; m.Cache != want {
 		t.Fatalf("Cache = %d, want %d", m.Cache, want)
 	}
-	// 1000000 - 450000 - 450000
 	if want := uint64(100000) * kb; m.Free != want {
 		t.Fatalf("Free = %d, want %d", m.Free, want)
 	}
+	if m.Used+m.Cache+m.Free != m.Total {
+		t.Fatalf("三档之和 %d != 总量 %d", m.Used+m.Cache+m.Free, m.Total)
+	}
 }
 
-// MemAvailable 估算偏保守时，缓存有可能算得比「剩余」还多。
-// 不夹一下，free = total - used - cache 会下溢成一个天文数字。
-// 这里刻意给一组自相矛盾的数值（可用只有 100MB，缓存却报了 850MB），
-// 只为覆盖这个防御分支。
+// 自相矛盾的 meminfo（可用只有 100MB，缓存却报了 850MB）不能算出负数：
+// uint64 下溢会直接变成天文数字。
 func TestParseMemInfoClampsCache(t *testing.T) {
 	raw := `MemTotal:        1000000 kB
 MemAvailable:     100000 kB
@@ -103,18 +103,18 @@ Shmem:            300000 kB
 	}
 }
 
-// 「实际占用 313 MB、前 5 名进程才 133 MB」是用户最常问的问题。
-// 这里验证构成能对上账：匿名 + tmpfs + 内核 + 余项 = 实际占用。
+// 「实际 313 MB、前 5 名进程才 133 MB」是用户最常问的问题。
+// 验证构成能对上账：匿名 + tmpfs + 内核 + 冷缓存 + 余项 = 实际占用。
 func TestParseMemInfoParts(t *testing.T) {
 	raw := `MemTotal:        1000000 kB
 MemFree:          100000 kB
 MemAvailable:     700000 kB
 Buffers:           20000 kB
-Cached:           300000 kB
+Cached:           640000 kB
 SReclaimable:      30000 kB
 Shmem:             20000 kB
-AnonPages:        180000 kB
-SUnreclaim:        50000 kB
+AnonPages:        150000 kB
+SUnreclaim:        20000 kB
 KernelStack:        2000 kB
 PageTables:         8000 kB
 `
@@ -125,22 +125,84 @@ PageTables:         8000 kB
 	if want := uint64(300000) * kb; m.Used != want {
 		t.Fatalf("Used = %d, want %d", m.Used, want)
 	}
-	if want := uint64(180000) * kb; p.Anon != want {
+	// 可用 700000 - 空闲 100000
+	if want := uint64(600000) * kb; m.Cache != want {
+		t.Fatalf("Cache = %d, want %d", m.Cache, want)
+	}
+	// 全量缓存 640000 + 20000 + 30000 - 20000 = 670000，其中 600000 被算作
+	// 可用，差的 70000 只能落在「实际」里。
+	if want := uint64(70000) * kb; p.ColdCache != want {
+		t.Fatalf("ColdCache = %d, want %d", p.ColdCache, want)
+	}
+	if want := uint64(150000) * kb; p.Anon != want {
 		t.Fatalf("Anon = %d, want %d", p.Anon, want)
 	}
 	if want := uint64(20000) * kb; p.Shmem != want {
 		t.Fatalf("Shmem = %d, want %d", p.Shmem, want)
 	}
-	// 50000 + 2000 + 8000
-	if want := uint64(60000) * kb; p.Kernel != want {
+	// 20000 + 2000 + 8000
+	if want := uint64(30000) * kb; p.Kernel != want {
 		t.Fatalf("Kernel = %d, want %d", p.Kernel, want)
 	}
-	// 300000 - 180000 - 20000 - 60000
-	if want := uint64(40000) * kb; p.Other != want {
+	// 300000 - 150000 - 20000 - 30000 - 70000
+	if want := uint64(30000) * kb; p.Other != want {
 		t.Fatalf("Other = %d, want %d", p.Other, want)
 	}
-	if sum := p.Anon + p.Shmem + p.Kernel + p.Other; sum != m.Used {
+	if sum := p.Anon + p.Shmem + p.Kernel + p.ColdCache + p.Other; sum != m.Used {
 		t.Fatalf("构成之和 %d != 实际占用 %d", sum, m.Used)
+	}
+}
+
+// 现场数据（960MB 的 KVM 小机器）：用户拿 free -m 和面板对不上账。
+// 钉住两点：实际/空闲与 free 的 used/free 列一致；冷缓存不能吞掉差额。
+func TestParseMemInfoLiveSmallVM(t *testing.T) {
+	raw := `MemTotal:         983500 kB
+MemFree:          334848 kB
+MemAvailable:     684556 kB
+Buffers:            1200 kB
+Cached:           440000 kB
+SReclaimable:      57506 kB
+Shmem:              2020 kB
+AnonPages:         56568 kB
+SUnreclaim:        22572 kB
+KernelStack:        1524 kB
+PageTables:         1224 kB
+SwapTotal:       1047552 kB
+SwapFree:        1047552 kB
+`
+	m := parseMemInfo(raw)
+
+	// free -m 报 used 291 / free 327 / available 668
+	if got, want := m.Used/kb/1024, uint64(291); got != want {
+		t.Fatalf("Used = %d MB, want %d MB", got, want)
+	}
+	if got, want := m.Free/kb/1024, uint64(327); got != want {
+		t.Fatalf("Free = %d MB, want %d MB（free 的 free 列）", got, want)
+	}
+	if got, want := m.Cache/kb/1024, uint64(341); got != want {
+		t.Fatalf("Cache = %d MB, want %d MB（可用 - 空闲）", got, want)
+	}
+	if m.Used+m.Cache+m.Free != m.Total {
+		t.Fatalf("三档之和 %d != 总量 %d", m.Used+m.Cache+m.Free, m.Total)
+	}
+
+	p := m.parts()
+	// 全量缓存约 496MB，只有 341MB 被算作可用，剩下 150MB 是冷缓存
+	if got := p.ColdCache / kb / 1024; got < 100 {
+		t.Fatalf("ColdCache = %d MB，太小，说明差额又被兜进了 Other", got)
+	}
+	if got, want := p.Anon/kb/1024, uint64(55); got != want {
+		t.Fatalf("Anon = %d MB, want %d MB（AnonPages）", got, want)
+	}
+	if sum := p.Anon + p.Shmem + p.Kernel + p.ColdCache + p.Other; sum != m.Used {
+		t.Fatalf("构成之和 %d != 实际占用 %d", sum, m.Used)
+	}
+	// 剩下的「其它」不该再是个大块头
+	if got := p.Other / kb / 1024; got > 100 {
+		t.Fatalf("Other = %d MB，余项过大，说明还有没被识别的成分", got)
+	}
+	if m.SwapUsed != 0 {
+		t.Fatalf("SwapUsed = %d, want 0", m.SwapUsed)
 	}
 }
 
@@ -157,7 +219,7 @@ SUnreclaim:        50000 kB
 	m := parseMemInfo(raw)
 	p := m.parts()
 
-	if sum := p.Anon + p.Shmem + p.Kernel + p.Other; sum > m.Used {
+	if sum := p.Anon + p.Shmem + p.Kernel + p.ColdCache + p.Other; sum > m.Used {
 		t.Fatalf("构成之和 %d 超过实际占用 %d", sum, m.Used)
 	}
 	if p.Other != 0 {
