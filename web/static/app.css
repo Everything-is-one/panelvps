@@ -514,6 +514,12 @@ tr.store-group-row td .badge { vertical-align: 1px; font-weight: 500; }
   display: flex; align-items: center;
   overflow-x: auto; white-space: nowrap; color: var(--text-2);
 }
+/* 搜索时路径栏退化为一行状态说明：保留输入框的边框与底色会让人以为
+ * 页面上有两个搜索框（工具栏里那个才是）。 */
+.path-bar.searching {
+  border-color: transparent; background: transparent; height: 30px;
+  padding: 0 2px; color: var(--muted); font-size: 13px;
+}
 .file-name { cursor: pointer; color: var(--accent); font-weight: 500; }
 .file-name.dir { font-weight: 600; }
 .file-name:hover { text-decoration: underline; text-underline-offset: 2px; }

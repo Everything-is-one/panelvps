@@ -1847,6 +1847,7 @@ function renderFilesView(root) {
     try {
       const data = await api("GET", "/api/v1/files?path=" + encodeURIComponent(cwd) + "&hidden=1");
       pathBar.textContent = "/" + (data.path || "");
+      pathBar.classList.remove("searching");
       searching = false;
       exitSearchBtn.style.display = "none";
       selected.clear();
@@ -1868,7 +1869,10 @@ function renderFilesView(root) {
     rowEls.clear();
     lastPick = -1;
     syncSelection();
+    // 路径栏平时是「当前目录」的输入框样式；搜索时它只是状态说明，
+    // 若保持同样的 38px 边框盒子，会和工具栏里的搜索框并排成两个输入框。
     pathBar.textContent = "搜索「" + q + "」· 范围 /" + (cwd || "");
+    pathBar.classList.add("searching");
     selBar.style.display = "none";
     exitSearchBtn.style.display = "";
 
