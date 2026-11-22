@@ -96,6 +96,11 @@ type Config struct {
 
 	// path 记录配置文件自身位置，便于回写默认配置。
 	path string
+	// baseDir 解析相对路径的基准目录，由 Load 按配置文件位置推导。
+	//
+	// 空值表示退化为旧行为（按进程工作目录解析），只给不经过 Load
+	// 的零散调用方（测试、脚本）兜底。
+	baseDir string
 }
 
 // Default 返回安全默认值。
@@ -140,6 +145,7 @@ func Default() *Config {
 func Load(path string) (*Config, error) {
 	cfg := Default()
 	cfg.path = path
+	cfg.baseDir = baseDirFor(path)
 
 	raw, err := os.ReadFile(path)
 	switch {
@@ -160,6 +166,82 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// baseDirFor 推导「相对路径的基准目录」。
+//
+// 相对路径绝不能按进程的工作目录解析。服务由 systemd 拉起，工作目录固定是
+// /opt/panelvps；而 CLI（menu / reset-password / info）是人在任意目录里敲的，
+// 典型就是 root 登录后的 /root。同一个 `./data` 于是解析成两个不同的目录，
+// CLI 改的是一份「影子数据库」：
+//
+//	菜单里提示「已重置 admin 的密码」，Web 端却始终 401 —— 它读的是另一个库。
+//
+// 这类问题最难受的地方是全程没有任何报错：影子库不存在就新建一个空库，
+// 空库里没有账号，`init` 又会好心地往里建一个，于是重置「成功」但无效。
+//
+// 约定与 install.sh 的布局一致：配置文件在 <prefix>/conf/ 下时，基准取
+// <prefix>（这样 ./data → <prefix>/data）；否则取配置文件所在目录。
+func baseDirFor(cfgPath string) string {
+	if strings.TrimSpace(cfgPath) == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(cfgPath)
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Dir(abs)
+	if filepath.Base(dir) == "conf" {
+		return filepath.Dir(dir)
+	}
+	return dir
+}
+
+// absPath 把配置里的相对路径转成绝对路径。
+//
+// 顺序：绝对路径原样保留 → 有 baseDir 就基于 baseDir → 最后才退到工作目录。
+func (c *Config) absPath(p string) (string, error) {
+	if filepath.IsAbs(p) {
+		return filepath.Clean(p), nil
+	}
+	if c.baseDir != "" {
+		return filepath.Clean(filepath.Join(c.baseDir, p)), nil
+	}
+	return filepath.Abs(p)
+}
+
+// absDataDir 解析 data_dir，并兼容一种历史布局。
+//
+// 兜底条件全部成立时才回落到旧行为（按工作目录解析）：
+//
+//	1. 基准目录推导出的新目录**不存在**；
+//	2. 按工作目录解析出来的目录**存在**。
+//
+// 也就是只有「新解析结果明显是空的新目录、而老位置确实有数据」时才认定
+// 这套安装依赖旧行为。标准安装（<prefix>/conf + <prefix>/data）两条路径
+// 完全一致，永远不会走到这里；0.4.2 → 0.4.3 升级也不会把谁的数据库换掉——
+// 换库等于换密码，等于把用户锁在门外。
+func (c *Config) absDataDir() (string, error) {
+	p := c.DataDir
+	if filepath.IsAbs(p) {
+		return filepath.Clean(p), nil
+	}
+	base, err := c.absPath(p)
+	if err != nil {
+		return "", err
+	}
+	if c.baseDir == "" {
+		return base, nil
+	}
+	if _, err := os.Stat(base); err == nil {
+		return base, nil
+	}
+	if legacy, lerr := filepath.Abs(p); lerr == nil && legacy != base {
+		if fi, serr := os.Stat(legacy); serr == nil && fi.IsDir() {
+			return legacy, nil
+		}
+	}
+	return base, nil
 }
 
 func (c *Config) applyDefaults() {
@@ -256,7 +338,7 @@ func (c *Config) Validate() error {
 	}
 
 	if !filepath.IsAbs(c.DataDir) {
-		abs, err := filepath.Abs(c.DataDir)
+		abs, err := c.absDataDir()
 		if err != nil {
 			return fmt.Errorf("data_dir 无法解析为绝对路径: %w", err)
 		}
@@ -288,7 +370,7 @@ func (c *Config) Validate() error {
 		c.BackupDir = filepath.Join(c.DataDir, c.BackupDir)
 	}
 	if !filepath.IsAbs(c.SitesRoot) {
-		abs, err := filepath.Abs(c.SitesRoot)
+		abs, err := c.absPath(c.SitesRoot)
 		if err != nil {
 			return fmt.Errorf("sites_root 无法解析: %w", err)
 		}

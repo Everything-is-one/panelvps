@@ -61,6 +61,103 @@ func TestValidateKeepsCustomBackupDir(t *testing.T) {
 	}
 }
 
+// 相对路径按「配置文件所在的安装前缀」解析，而不是按进程工作目录。
+//
+// 这是 0.4.3 修的那个坑：服务的工作目录是 /opt/panelvps，人敲 CLI 时却在
+// /root，同一份 ./data 解析成两个目录，于是 reset-password 改的是影子库，
+// Web 端永远登不上，而且两边都不报错。
+func TestLoadResolvesDataDirAgainstPrefix(t *testing.T) {
+	prefix := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(prefix, "conf"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	confPath := filepath.Join(prefix, "conf", "panel.yaml")
+	if err := os.WriteFile(confPath, []byte("listen: 127.0.0.1:20873\ndata_dir: ./data\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 换到一个完全无关的工作目录，模拟「root 登录后在 /root 敲命令」。
+	elsewhere := t.TempDir()
+	t.Chdir(elsewhere)
+
+	cfg, err := Load(confPath)
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	want := filepath.Join(prefix, "data")
+	if cfg.DataDir != want {
+		t.Fatalf("data_dir 应按安装前缀解析为 %q，得到 %q", want, cfg.DataDir)
+	}
+	if wantDB := filepath.Join(want, "panel.db"); cfg.DBPath != wantDB {
+		t.Fatalf("db_path 应落在 data_dir 下 %q，得到 %q", wantDB, cfg.DBPath)
+	}
+}
+
+// 配置文件不在 conf/ 子目录时，基准退成它自己所在的目录。
+func TestLoadResolvesDataDirAgainstConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	confPath := filepath.Join(dir, "panel.yaml")
+	if err := os.WriteFile(confPath, []byte("data_dir: ./data\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+
+	cfg, err := Load(confPath)
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	if want := filepath.Join(dir, "data"); cfg.DataDir != want {
+		t.Fatalf("期望 %q，得到 %q", want, cfg.DataDir)
+	}
+}
+
+// 绝对路径的 data_dir 一律原样保留——升级不能把别人的数据目录挪走。
+func TestLoadKeepsAbsoluteDataDir(t *testing.T) {
+	custom := filepath.Join(t.TempDir(), "mydata")
+	dir := t.TempDir()
+	confPath := filepath.Join(dir, "panel.yaml")
+	if err := os.WriteFile(confPath, []byte("data_dir: "+custom+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+
+	cfg, err := Load(confPath)
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	if cfg.DataDir != custom {
+		t.Fatalf("绝对路径被改写: %q", cfg.DataDir)
+	}
+}
+
+// 历史布局兜底：新位置不存在、老位置（按工作目录）确实有目录时，继续用老位置。
+// 没有这条，某些把配置放在 <prefix>/conf 之外的安装会在升级后突然换库。
+func TestLoadFallsBackToLegacyDataDir(t *testing.T) {
+	prefix := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(prefix, "conf"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	confPath := filepath.Join(prefix, "conf", "panel.yaml")
+	if err := os.WriteFile(confPath, []byte("data_dir: ./data\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 老位置：工作目录下的 data/ 确实存在（新位置 <prefix>/data 不存在）。
+	work := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(work, "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(work)
+
+	cfg, err := Load(confPath)
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	if want := filepath.Join(work, "data"); cfg.DataDir != want {
+		t.Fatalf("应回落到老位置 %q，得到 %q", want, cfg.DataDir)
+	}
+}
+
 // PatchScalar 只改一行，其余内容（注释、顺序、相对路径）必须原样保留。
 func TestPatchScalar(t *testing.T) {
 	dir := t.TempDir()
