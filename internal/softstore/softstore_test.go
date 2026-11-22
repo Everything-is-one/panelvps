@@ -243,3 +243,30 @@ func TestAptErrorKeepsUnknownOutput(t *testing.T) {
 		t.Fatalf("未知错误应保留原始错误：%v", err)
 	}
 }
+
+// 校验必须排在启动之前：先起服务再 nginx -t，80 已被自己占住。
+func TestNginxCheckBeforeStart(t *testing.T) {
+	s, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.Get("nginx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkAt, startAt := -1, -1
+	for i, a := range m.Plan.Install {
+		if a.Check != nil && checkAt < 0 {
+			checkAt = i
+		}
+		if a.Service != nil && a.Service.Start && startAt < 0 {
+			startAt = i
+		}
+	}
+	if checkAt < 0 || startAt < 0 {
+		t.Fatalf("nginx 清单缺少 check 或 start：check=%d start=%d", checkAt, startAt)
+	}
+	if checkAt > startAt {
+		t.Errorf("nginx -t 在启动之后执行（check=%d start=%d），会撞 EADDRINUSE", checkAt, startAt)
+	}
+}

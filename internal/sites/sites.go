@@ -15,6 +15,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/Everything-is-one/panelvps/internal/bindfail"
 )
 
 // ErrInvalid 表示站点参数不合法。
@@ -269,6 +271,16 @@ func (m *Manager) Remove(name string) error {
 }
 
 // Test 执行 nginx -t。
+//
+// 这个命令同时验两件事：配置语法，以及每个 listen 能不能 bind。后者在
+// 面板里几乎必然失败，且与配置好坏无关：
+//
+//   - 缺 CAP_NET_BIND_SERVICE（服务单元旧版本）→ EACCES(13)；
+//   - nginx 已经跑着，80/443 就是它自己占的 → EADDRINUSE(98)。
+//
+// 直接把这些判成「配置错误」，会让新建站点、启用站点一律失败在最后一步，
+// 而写入的配置其实是对的。所以按 errno 分开处理：权限问题直接放行；
+// 占用问题只在「nginx 确实在跑」时放行 —— 没在跑还占着，那是真的冲突。
 func (m *Manager) Test() (string, error) {
 	bin := m.NginxBin
 	if bin == "" {
@@ -280,15 +292,40 @@ func (m *Manager) Test() (string, error) {
 	out, err := exec.Command(bin, "-t").CombinedOutput()
 	msg := strings.TrimSpace(string(out))
 	if err != nil {
+		switch bindfail.Classify(msg) {
+		case bindfail.PermDenied, bindfail.MixedBind:
+			return msg + "\n（端口无法试绑：面板进程缺 CAP_NET_BIND_SERVICE，配置语法本身通过。到「设置 → 服务单元」用内置版本覆盖并重启面板）", nil
+		case bindfail.AddrInUse:
+			if nginxRunning() {
+				return msg + "\n（端口已被运行中的 nginx 占用，属预期，配置语法本身通过）", nil
+			}
+		}
 		return msg, fmt.Errorf("Nginx 配置校验失败: %s", msg)
 	}
 	return msg, nil
+}
+
+// nginxRunning 判断是否已有 nginx 主进程在跑。
+//
+// 用来区分「端口被 nginx 自己占着」（正常）与「端口被别的程序占着」
+// （真冲突）。systemctl 不可用时退化为看 pid 文件。
+func nginxRunning() bool {
+	if err := exec.Command("systemctl", "is-active", "--quiet", "nginx").Run(); err == nil {
+		return true
+	}
+	_, err := os.Stat("/run/nginx.pid")
+	return err == nil
 }
 
 // Reload 校验通过后热加载。
 func (m *Manager) Reload() (string, error) {
 	if msg, err := m.Test(); err != nil {
 		return msg, err
+	}
+	// nginx 没在跑时 nginx -s reload 只会报 open() /run/nginx.pid failed，
+	// 那句话对用户毫无指向性。配置已经写好了，缺的是把 nginx 起起来。
+	if !nginxRunning() {
+		return "", errors.New("Nginx 未运行，配置已写入但尚未生效：到「软件商店」确认 Nginx 已安装并启动，再点一次「应用」")
 	}
 	bin := m.NginxBin
 	if bin == "" {

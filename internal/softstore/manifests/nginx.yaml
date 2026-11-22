@@ -13,8 +13,10 @@ warning: ""
 plan:
   install:
     - apt: { names: [nginx], update: true }
-    - service: { name: nginx, enable: true, start: true }
+    # 校验放在启动之前：nginx -t 会真开一遍监听套接字，若先 start 再校验，
+    # 80 端口已被自己占住，必然报 EADDRINUSE。
     - check: { cmd: ["nginx", "-t"] }
+    - service: { name: nginx, enable: true, start: true }
   uninstall:
     - service: { name: nginx, stop: true, disable: true }
     - apt: { names: [nginx], purge: true }

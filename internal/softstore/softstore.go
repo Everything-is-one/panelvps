@@ -35,6 +35,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/Everything-is-one/panelvps/internal/bindfail"
 	"github.com/Everything-is-one/panelvps/internal/sysinfo"
 )
 
@@ -923,7 +924,17 @@ func unitNotLoaded(out string) bool {
 func runCheck(ctx context.Context, a CheckAction, log func(string)) error {
 	name := a.Cmd[0]
 	args := a.Cmd[1:]
-	if err := runCmd(ctx, log, name, args...); err != nil {
+	out, err := runCmdCapture(ctx, log, name, args...)
+	if err != nil {
+		if bindfail.IsBindOnly(out) {
+			// 配置本身是好的，只是这一步验不了端口：面板作为父进程继承了
+			// 单元的能力边界集，缺 CAP_NET_BIND_SERVICE 时 nginx -t 会在
+			// bind() 处吃 EACCES；nginx 若已在运行则必然 EADDRINUSE。
+			// 判成失败会让装好的软件白白回滚。
+			log("  端口校验被沙箱挡下，配置语法本身通过；若日志里有 bind() ... Permission denied，")
+			log("  到「设置 → 服务单元」用内置版本覆盖并重启面板（缺 CAP_NET_BIND_SERVICE）")
+			return nil
+		}
 		return fmt.Errorf("校验命令返回非零: %w", err)
 	}
 	return nil
