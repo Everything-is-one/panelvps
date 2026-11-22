@@ -180,6 +180,54 @@ REALITY 层，先核对客户端里的**公钥（pbk）与 shortId** 是否与�
 | 日志 | 六个固定来源，不接受任意路径；只 seek 文件末尾 512KB，不会把整个日志读进内存 |
 | 异步任务 | 内存态执行器，并发 2、单任务 15 分钟超时、日志上限 256KB，避免 apt/证书撑爆 HTTP 超时 |
 
+## 忘记密码：先确认服务在用哪个库
+
+重置密码本身只有一条命令，但「重置成功却还是登不上」几乎都是同一个原因：
+**CLI 改的库和服务读的库不是同一个文件**。
+
+```bash
+sudo /opt/panelvps/bin/panelvps info                      # 服务实际打开哪个库
+sudo /opt/panelvps/bin/panelvps reset-password -user admin # 重置为随机 20 位
+```
+
+`info` 会打印两件事：配置解析出的数据库路径，以及从 `/proc/<pid>/fd` 反查到的
+**服务真正打开的文件**。两者不一致时会直接给出结论，并列出其它位置上的
+「影子库」——那些库通常是 CLI 在别的目录里跑出来的，里面也有 admin，看起来
+一切正常，实际上和 Web 端毫无关系。
+
+指定密码（仍走同一套策略校验）：
+
+```bash
+sudo /opt/panelvps/bin/panelvps reset-password -user admin -password '你的新密码'
+```
+
+配置读不出来、或者要越过配置直接改某个文件时用 `-db`：
+
+```bash
+sudo /opt/panelvps/bin/panelvps reset-password -db /opt/panelvps/data/panel.db -user admin
+```
+
+### 为什么会出现两个库
+
+历史版本按**进程工作目录**解析 `data_dir`（默认 `./data`）。服务由 systemd
+拉起，工作目录固定 `/opt/panelvps`，解析成 `/opt/panelvps/data`；而人在 `/root`
+里敲 `panelvps`，同一个 `./data` 解析成 `/root/data`。CLI 发现库里没有账号会
+新建一份，于是：
+
+- 菜单提示「已重置密码」，Web 端始终 `账号或密码错误`；
+- 服务日志里还留着一条首次启动时打印的初始密码；
+- 两边都不报错，所以极难自查。
+
+从 0.4.3 起，相对路径以**配置文件所在的安装前缀**为基准（`<prefix>/conf/panel.yaml`
+→ `<prefix>`），与工作目录无关。升级不会改变既有安装的数据库位置：新解析出的
+目录不存在、而按工作目录解析出的目录确实存在时，仍回落到旧位置。
+
+### 重置后的自检
+
+`reset-password` / 菜单第 7 项在写完后会**回读账号并重新校验明文密码**，
+校验不过直接报错，而不是打一句「已重置」就结束——写进影子库、库是只读副本、
+事务没提交，这三种失败以前都是静默的。
+
 ## 网站与软件商店契约
 
 | 能力 | 说明 |
