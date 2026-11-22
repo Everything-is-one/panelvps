@@ -19,33 +19,28 @@ Environment=GOGC=50
 # 这个限额罩住整个 cgroup，Xray 作为子进程也在里面
 MemoryMax=256M
 
-# ---- 加固 ----
-# 别用白名单。这个单元被改过两轮，两次都是白名单漏了路径：
+# ---- 写保护：默认放开，只读点名 ----
+# 这个单元被白名单坑过三轮，一次比一次隐蔽：
 #   1. strict + 白名单 → 文件管理器 mkdir /home/aaa 报 read-only；
-#   2. full + 零散白名单 → 软件商店装 Xray 时 mkdir /usr/local/share/xray
-#      报 read-only。后者更隐蔽：systemd 对白名单里**不存在**的路径是
-#      静默跳过的（- 前缀），目录没建就没有 bind mount，照样只读。
+#   2. full + 零散白名单 → 装 Xray 时 mkdir /usr/local/share/xray 报 read-only；
+#   3. full + ReadWritePaths=-/etc -/usr -/var → 装 Nginx 时 dpkg 在
+#      /etc/default/nginx 报 read-only（单元若是 0.4 之前装的，仍是 strict，
+#      整机只读）。
 #
-# 面板的本职就是改系统：装包（apt 写 /usr /var/lib/dpkg /etc）、下发站点与
-# 防火墙配置、切换内核参数。full 下这些全被挡住，功能就是缺的。
+# 根本矛盾：白名单是「枚举所有要写的目录」，而面板的本职就是替用户改系统
+# （装包写 /usr /etc /var、建站写 /etc/nginx、防火墙写 /etc/nftables.conf、
+# 换源写 /etc/sysctl.d），枚举永远漏得掉；何况 systemd 对白名单里
+# **不存在**的路径是静默跳过的（- 前缀），同一个单元在不同机器上行为还不一样。
 #
-# 所以：full + 明确放开 /usr /etc /var。/boot 与 /efi 仍然只读，
-# 改不了内核与引导。写保护对 root 面板的收益本来有限（它能写 systemd
-# 单元、带 CAP_DAC_OVERRIDE），真正有用的是下面这些：能力集、地址族、
-# 内核参数与模块、cgroup —— 这些才是挡提权与横向移动的地方。
-ProtectSystem=full
-ReadWritePaths=-/etc -/usr -/var
-# 再点名软件商店实际落地的目录。
+# 所以反过来写：默认全可写，只把「面板绝不该碰」的两处点成只读。
+# 故障面从「N 个可能遗漏的白名单」缩成「2 个明确的只读路径」，
+# 出问题时错误也直白（写到 /boot 才报 read-only）。
 #
-# 两个真实原因让「-/usr 放开」不等于「/usr/local/bin 可写」：
-#   1. 单元是旧版本（Web 升级只换二进制，不动 /etc/systemd/system），
-#      老单元的零散白名单里没有 /usr/local/bin；
-#   2. ReadWritePaths 的 bind 挂载不覆盖更内层的独立挂载点，而 systemd
-#      对**不存在**的路径是静默跳过的 —— /usr/local 若从宿主机 bind 进来，
-#      /usr 整体放开也写不进去。
-# 点名写一遍成本为零，装 Xray 时 mkdir /usr/local/bin 就不会再报
-# read-only file system。install.sh 会在启动前把这些目录建好。
-ReadWritePaths=-/usr/local/bin -/usr/local/share -/usr/local/etc -/etc/systemd/system -/etc/xray
+# 写保护对 root 面板的边际收益本来就低（它能写 systemd 单元、带
+# CAP_DAC_OVERRIDE）。真正挡提权与横向移动的是下面这些：能力集、地址族、
+# 内核参数与模块、cgroup —— 那些一律保留。
+ProtectSystem=no
+ReadOnlyPaths=-/boot -/efi
 # /home 与 /root 必须可写：站点、备份、用户目录都在这里。
 # /tmp 与系统共用：PrivateTmp 会让文件管理器看到的 /tmp 和 SSH 里不是同一个目录，
 # 用户上传完再登录找不到文件，这是纯粹的困惑源。

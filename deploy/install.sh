@@ -159,17 +159,18 @@ env_report() {
 
     echo "  systemd 沙箱："
     if [[ -f "$UNIT" ]]; then
-        if grep -q "ReadWritePaths=.*-/usr" "$UNIT" && grep -q -- "-/usr/local/bin" "$UNIT"; then
-            ok "单元已放开 /usr /etc /var 与软件商店目录（/boot 仍只读）"
-        elif grep -q "ReadWritePaths=.*-/usr" "$UNIT"; then
-            warn "单元放开了 /usr，但没点名 /usr/local/bin —— 装 Xray 仍可能报 read-only。"
+        if grep -qE "^ProtectSystem=no$" "$UNIT" && grep -qE "^ReadOnlyPaths=.*-/boot" "$UNIT"; then
+            ok "单元默认放开写权限，仅 /boot /efi 只读（装包、建站、防火墙都不会再撞沙箱）"
+        elif grep -qE "^ProtectSystem=(strict|full|yes|true)$" "$UNIT"; then
+            PS_VAL="$(grep -m1 -E '^ProtectSystem=' "$UNIT")"
+            if grep -qE "^ProtectSystem=strict$" "$UNIT"; then
+                warn "单元仍是旧写法 $PS_VAL：整机只读，装包/建站全部会失败。"
+            else
+                warn "单元仍是旧写法 $PS_VAL：系统目录只读，装包会报 read-only file system。"
+            fi
             warn "重跑安装脚本，或到「设置 → 服务单元」用内置版本覆盖后重启面板。"
-        elif grep -q "/usr/local/share/xray" "$UNIT"; then
-            warn "单元还是旧的零散白名单：路径不存在时 systemd 会静默跳过，"
-            warn "软件商店会报 read-only file system。重跑安装脚本，或："
-            warn "  mkdir -p /usr/local/share/xray && systemctl restart panelvps"
         else
-            warn "单元的 ReadWritePaths 不是最新写法，装包/建站可能写不进系统目录"
+            warn "单元的写保护写法无法识别，装包/建站可能写不进系统目录"
         fi
 
         # apt 的 sandbox 用 _apt 下载，root 对 _apt 名下的文件改权限要靠 FOWNER。
@@ -338,9 +339,8 @@ if [[ "$PUBLIC" -eq 1 ]]; then
 fi
 
 info "安装 systemd 单元"
-# 先把单元里 ReadWritePaths 点名的目录建出来。
-# systemd 对不存在的路径是静默跳过的：目录没建，bind 挂载就不会发生，
-# 面板再往里写就是 read-only —— 软件商店装 Xray 撞过这面墙。
+# 单元已改成「默认可写，仅 /boot /efi 只读」，不再靠 ReadWritePaths 白名单开洞，
+# 所以下面这几个目录不是沙箱前提，只是软件商店的落地点（download 动作自己也会建）。
 mkdir -p /usr/local/bin /usr/local/share /etc/xray
 install -m 0644 "$(dirname "$0")/panelvps.service" "$UNIT"
 
