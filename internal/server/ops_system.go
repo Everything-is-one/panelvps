@@ -75,7 +75,13 @@ func (s *Server) handleSystemTop(w http.ResponseWriter, r *http.Request) {
 			ok(w, map[string]any{"supported": false, "reason": err.Error(), "items": []any{}})
 			return
 		}
-		ok(w, map[string]any{"supported": true, "kind": kind, "items": items})
+		// 带上全量合计：前端要说清「剩下 N 个进程还占了多少」，
+		// 否则「实际 313 MB、前 5 名 133 MB」永远像个 bug。
+		sum, count := s.metrics.ProcessTotals()
+		ok(w, map[string]any{
+			"supported": true, "kind": kind, "items": items,
+			"proc_rss_sum": sum, "proc_count": count,
+		})
 	case "disk":
 		items, err := metrics.TopMounts(limit)
 		if err != nil {

@@ -21,6 +21,10 @@ var (
 	topAt    time.Time
 	topItems []TopProc
 	topErr   error
+	// 同一份采样顺带算出的「所有进程 RSS 合计」与进程数：
+	// 概览要让「前 5 名只占 133 MB，实际却是 313 MB」这件事有个去处。
+	topSumRSS uint64
+	topCount  int
 )
 
 const (
@@ -76,6 +80,20 @@ func (c *Collector) TopProcesses(kind string, limit int) ([]TopProc, error) {
 	return out, nil
 }
 
+// ProcessTotals 返回所有进程的 RSS 合计与进程数。
+//
+// 与排行共用同一次采样（2 秒缓存），所以通常只是一次 map 维度的读取。
+// 注意 RSS 之和会重复计算共享页（每个进程都把共享库算进自己的 RSS），
+// 它只适合回答「前 5 之外的进程大概占多少」，不能与「实际占用」直接相减。
+func (c *Collector) ProcessTotals() (sum uint64, count int) {
+	if _, err := sampleProcesses(); err != nil {
+		return 0, 0
+	}
+	topMu.Lock()
+	defer topMu.Unlock()
+	return topSumRSS, topCount
+}
+
 func sampleProcesses() ([]TopProc, error) {
 	topMu.Lock()
 	defer topMu.Unlock()
@@ -107,6 +125,13 @@ func sampleProcesses() ([]TopProc, error) {
 	if memTotal == 0 {
 		memTotal = 1
 	}
+
+	// 全量合计：跟排行用同一批数据，避免两处数字对不上。
+	var sumRSS uint64
+	for _, b := range second {
+		sumRSS += b.rss
+	}
+	topSumRSS, topCount = sumRSS, len(second)
 	cores := float64(runtime.NumCPU())
 	if cores < 1 {
 		cores = 1

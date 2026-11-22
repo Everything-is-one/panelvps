@@ -103,6 +103,71 @@ Shmem:            300000 kB
 	}
 }
 
+// 「实际占用 313 MB、前 5 名进程才 133 MB」是用户最常问的问题。
+// 这里验证构成能对上账：匿名 + tmpfs + 内核 + 余项 = 实际占用。
+func TestParseMemInfoParts(t *testing.T) {
+	raw := `MemTotal:        1000000 kB
+MemFree:          100000 kB
+MemAvailable:     700000 kB
+Buffers:           20000 kB
+Cached:           300000 kB
+SReclaimable:      30000 kB
+Shmem:             20000 kB
+AnonPages:        180000 kB
+SUnreclaim:        50000 kB
+KernelStack:        2000 kB
+PageTables:         8000 kB
+`
+	m := parseMemInfo(raw)
+	p := m.parts()
+
+	// 1000000 - 700000
+	if want := uint64(300000) * kb; m.Used != want {
+		t.Fatalf("Used = %d, want %d", m.Used, want)
+	}
+	if want := uint64(180000) * kb; p.Anon != want {
+		t.Fatalf("Anon = %d, want %d", p.Anon, want)
+	}
+	if want := uint64(20000) * kb; p.Shmem != want {
+		t.Fatalf("Shmem = %d, want %d", p.Shmem, want)
+	}
+	// 50000 + 2000 + 8000
+	if want := uint64(60000) * kb; p.Kernel != want {
+		t.Fatalf("Kernel = %d, want %d", p.Kernel, want)
+	}
+	// 300000 - 180000 - 20000 - 60000
+	if want := uint64(40000) * kb; p.Other != want {
+		t.Fatalf("Other = %d, want %d", p.Other, want)
+	}
+	if sum := p.Anon + p.Shmem + p.Kernel + p.Other; sum != m.Used {
+		t.Fatalf("构成之和 %d != 实际占用 %d", sum, m.Used)
+	}
+}
+
+// MemAvailable 偏保守时构成之和可能超过 Used，必须按比例压回去，
+// 否则前端会出现「各分项加起来比总数还大」的假数据。
+func TestParseMemInfoPartsClamped(t *testing.T) {
+	raw := `MemTotal:        1000000 kB
+MemAvailable:     900000 kB
+Cached:                0 kB
+AnonPages:        200000 kB
+Shmem:            100000 kB
+SUnreclaim:        50000 kB
+`
+	m := parseMemInfo(raw)
+	p := m.parts()
+
+	if sum := p.Anon + p.Shmem + p.Kernel + p.Other; sum > m.Used {
+		t.Fatalf("构成之和 %d 超过实际占用 %d", sum, m.Used)
+	}
+	if p.Other != 0 {
+		t.Fatalf("压回之后不该还有余项，得到 %d", p.Other)
+	}
+	if !(p.Anon > p.Shmem && p.Shmem > p.Kernel) {
+		t.Fatalf("比例没保住：anon=%d shmem=%d kernel=%d", p.Anon, p.Shmem, p.Kernel)
+	}
+}
+
 func TestMemFreeOf(t *testing.T) {
 	cases := []struct{ total, used, cache, want uint64 }{
 		{100, 40, 30, 30},

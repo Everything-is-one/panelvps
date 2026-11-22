@@ -43,6 +43,25 @@ type Snapshot struct {
 	// Container 表示内存与 CPU 数据来自 cgroup 限额而非宿主机 /proc。
 	// LXC 默认不挂 lxcfs 时，/proc 报的是宿主机数据，必须用 cgroup 纠正。
 	Container bool `json:"container"`
+	// MemParts 把 MemUsed 拆成能对上账的几块。
+	//
+	// 存在的理由：概览写「实际 313 MB」，用户往下看前 5 名进程只有 133 MB，
+	// 第一反应是统计错了。其实差额是另外几十个小进程 + 内核 slab / 页表 /
+	// 内核栈 + tmpfs，这些都不该出现在「进程排行」里，但必须能看到去处，
+	// 否则这个数永远像凭空冒出来的。
+	MemParts *MemParts `json:"mem_parts,omitempty"`
+}
+
+// MemParts 是「实际占用」的构成，四项之和等于 MemUsed。
+type MemParts struct {
+	// Anon 进程匿名页：堆、栈、Go heap、mmap(MAP_ANON)。所有进程加总，不只前 5。
+	Anon uint64 `json:"anon"`
+	// Shmem tmpfs 与共享内存。没有 swap 时收不回来，所以算「实际」不算「缓存」。
+	Shmem uint64 `json:"shmem"`
+	// Kernel 不可回收的内核内存：slab（SUnreclaim）+ 内核栈 + 页表。
+	Kernel uint64 `json:"kernel"`
+	// Other 余项：per-cpu、vmalloc、驱动缓冲、预留等，通常不大。
+	Other uint64 `json:"other"`
 }
 
 // Collector 维护上一次的 CPU 计数，用于计算占用率。
@@ -76,6 +95,7 @@ func (c *Collector) Collect() Snapshot {
 	mem := memInfo()
 	s.MemTotal, s.MemUsed, s.MemCache, s.MemFree = mem.Total, mem.Used, mem.Cache, mem.Free
 	s.SwapTotal, s.SwapUsed = mem.SwapTotal, mem.SwapUsed
+	s.MemParts = mem.parts()
 
 	// 只有 cgroup 限额明显小于物理内存时才认为读到了容器视角。
 	// 真机上 memory.max 要么是 "max"，要么等于物理内存，这里不会命中。
@@ -89,6 +109,9 @@ func (c *Collector) Collect() Snapshot {
 			s.MemUsed = lim
 		}
 		s.Container = true
+		// 容器口径下 /proc/meminfo 的 anon/slab 是宿主机的，必须换成
+		// 本 cgroup 的 memory.stat。
+		s.MemParts = cgroupMemParts(s.MemUsed)
 	}
 
 	c.mu.Lock()
@@ -207,6 +230,21 @@ type memStats struct {
 	Free      uint64 // 真正闲置：总量 - 占用 - 缓存
 	SwapTotal uint64
 	SwapUsed  uint64
+
+	// 以下三项是 Used 的组成部分，从 /proc/meminfo 直接读到。
+	Anon   uint64 // AnonPages
+	Shmem  uint64 // Shmem（tmpfs / 共享内存）
+	Kernel uint64 // SUnreclaim + KernelStack + PageTables
+}
+
+// parts 把 memStats 里的构成转成对外结构，余项兜在 Other 里。
+func (m memStats) parts() *MemParts {
+	p := &MemParts{Anon: m.Anon, Shmem: m.Shmem, Kernel: m.Kernel}
+	sum := p.Anon + p.Shmem + p.Kernel
+	if sum < m.Used {
+		p.Other = m.Used - sum
+	}
+	return p
 }
 
 func memInfo() memStats {
@@ -259,6 +297,20 @@ func parseMemInfo(raw string) memStats {
 	}
 	m.Cache = cache
 	m.Free = m.Total - m.Used - m.Cache
+
+	// 「实际占用」的构成。四项之和略小于 Used 是正常的：剩余部分是 per-cpu、
+	// vmalloc、驱动私有缓冲这类没有独立 meminfo 字段的东西，统一记到 Other。
+	m.Anon = vals["AnonPages"]
+	m.Shmem = vals["Shmem"]
+	m.Kernel = vals["SUnreclaim"] + vals["KernelStack"] + vals["PageTables"]
+	if sum := m.Anon + m.Shmem + m.Kernel; sum > m.Used && sum > 0 {
+		// MemAvailable 的估算会让 Used 偏小；按比例压到 Used 以内，
+		// 否则前端会出现「构成比总数还大」这种一眼假的数据。
+		// 最后一项取余数，避免整除截断让四项之和差几个字节。
+		m.Anon = m.Used * m.Anon / sum
+		m.Shmem = m.Used * m.Shmem / sum
+		m.Kernel = m.Used - m.Anon - m.Shmem
+	}
 
 	m.SwapTotal = vals["SwapTotal"]
 	if m.SwapTotal > vals["SwapFree"] {

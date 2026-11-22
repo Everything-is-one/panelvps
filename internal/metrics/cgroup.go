@@ -68,6 +68,43 @@ func cgroupMemDetail() (limit, used, cache uint64) {
 	return 0, 0, 0
 }
 
+// cgroupMemParts 在容器口径下把「实际占用」拆成匿名 / tmpfs / 内核。
+//
+// 容器里不能读 /proc/meminfo 的 AnonPages / Slab：那是宿主机的数字。
+// memory.stat 才有本 cgroup 的 anon、shmem、slab_unreclaimable。
+// 拿不到就返回 nil，前端会退回只显示总数。
+func cgroupMemParts(used uint64) *MemParts {
+	path := filepath.Join(cgroupRoot, "memory.stat")
+	if _, err := os.Stat(path); err != nil {
+		path = filepath.Join(cgroupRoot, "memory", "memory.stat")
+	}
+	anon := readStatKey(path, "anon")
+	if anon == 0 {
+		anon = readStatKey(path, "total_rss") // cgroup v1
+	}
+	shmem := readStatKey(path, "shmem")
+	if shmem == 0 {
+		shmem = readStatKey(path, "total_shmem")
+	}
+	slab := readStatKey(path, "slab_unreclaimable")
+	if slab == 0 {
+		slab = readStatKey(path, "total_slab_unreclaimable")
+	}
+	if anon == 0 && shmem == 0 && slab == 0 {
+		return nil
+	}
+	if sum := anon + shmem + slab; sum > used && sum > 0 {
+		anon = used * anon / sum
+		shmem = used * shmem / sum
+		slab = used - anon - shmem // 取余数，四项之和才能正好等于 used
+	}
+	p := &MemParts{Anon: anon, Shmem: shmem, Kernel: slab}
+	if sum := p.Anon + p.Shmem + p.Kernel; sum < used {
+		p.Other = used - sum
+	}
+	return p
+}
+
 // reclaimableCache 返回能还给内核的那部分页缓存。
 //
 // tmpfs / 共享内存（shmem）在没开 swap 时收不回来，必须从 file 里减掉，
