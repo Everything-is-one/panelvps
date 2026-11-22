@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"sort"
 	"strconv"
@@ -18,6 +19,12 @@ type securityRecord struct {
 	Last   string `json:"last"`
 	Detail string `json:"detail"`
 	Banned bool   `json:"banned"`
+	// Country 与 CountryCode 由 geoip 回填；查不到时为空，
+	// 前端显示「—」而不是报错。
+	Country     string `json:"country,omitempty"`
+	CountryCode string `json:"country_code,omitempty"`
+	// Permanent 表示该 IP 已被长期封禁（区别于 ban_minutes 的临时封禁）。
+	Permanent bool `json:"permanent,omitempty"`
 }
 
 type sourceStat struct {
@@ -47,10 +54,11 @@ func (s *Server) handleSecurityRecords(w http.ResponseWriter, r *http.Request) {
 
 	records := make([]securityRecord, 0, 64)
 	resp := map[string]any{
-		"window_min":  minutes,
-		"threshold":   s.cfg.SSHGuardThreshold,
-		"guard":       s.cfg.SSHGuardEnabled,
-		"ban_minutes": s.banMinutes(),
+		"window_min":      minutes,
+		"threshold":       s.cfg.SSHGuardThreshold,
+		"perma_threshold": int(s.permaThreshold.Load()),
+		"guard":           s.cfg.SSHGuardEnabled,
+		"ban_minutes":     s.banMinutes(),
 	}
 
 	// --- SSH 爆破 ---
@@ -112,13 +120,36 @@ func (s *Server) handleSecurityRecords(w http.ResponseWriter, r *http.Request) {
 
 	// 已封禁的 IP 打标，前端就不用再点一次「封禁」才发现已经封过
 	banned := map[string]bool{}
+	permanent := map[string]bool{}
 	if bans, err := firewall.ListBans(); err == nil {
 		for _, b := range bans {
 			banned[b.IP] = true
+			if b.Permanent {
+				permanent[b.IP] = true
+			}
 		}
 	}
 	for i := range records {
 		records[i].Banned = banned[records[i].IP]
+		records[i].Permanent = permanent[records[i].IP]
+	}
+
+	// 归属地：批量查一次，失败就留空。geo=0 可跳过（离线环境少等几秒）。
+	if s.geoOn.Load() && r.URL.Query().Get("geo") != "0" && len(records) > 0 {
+		ips := make([]string, 0, len(records))
+		for _, rec := range records {
+			ips = append(ips, rec.IP)
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		if infos := s.geo.Lookup(ctx, ips); len(infos) > 0 {
+			for i := range records {
+				if info, ok := infos[records[i].IP]; ok {
+					records[i].Country = info.Country
+					records[i].CountryCode = info.Code
+				}
+			}
+		}
+		cancel()
 	}
 
 	// 按次数排；次数相同按时间近的在前

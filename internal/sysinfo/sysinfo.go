@@ -521,9 +521,16 @@ func MemAvailable() int64 {
 }
 
 // FindSSHPorts 从 sshd 配置推断监听端口，失败时回退到 22。
+// SSH 端口可能写在主配置，也可能在 sshd_config.d/*.conf 里
+// （Debian 11+ 默认把 Include 放在第一行，drop-in 的优先级更高）。
+// 防火墙要把生效的端口全部放行，漏一个就可能把人锁在门外。
 func FindSSHPorts() []int {
 	ports := map[int]bool{}
-	for _, path := range []string{"/etc/ssh/sshd_config"} {
+	files := []string{"/etc/ssh/sshd_config"}
+	if items, err := filepath.Glob("/etc/ssh/sshd_config.d/*.conf"); err == nil {
+		files = append(files, items...)
+	}
+	for _, path := range files {
 		if raw, err := os.ReadFile(path); err == nil {
 			sc := bufio.NewScanner(bytes.NewReader(raw))
 			for sc.Scan() {

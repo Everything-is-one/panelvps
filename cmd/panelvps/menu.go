@@ -3,9 +3,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -64,13 +68,17 @@ func runMenu(cfgPath, username string) error {
 			m.action(m.showInfo)
 		case "10":
 			m.action(m.reboot)
+		case "11":
+			m.action(m.setSSHPort)
+		case "12":
+			m.action(m.setAccessPath)
 		case "0", "q", "exit", "quit":
 			fmt.Println("已退出")
 			return nil
 		case "":
 			// 回车不做事，直接回到菜单
 		default:
-			m.note("无效选项，请输入 0–10")
+			m.note("无效选项，请输入 0–12")
 		}
 	}
 }
@@ -119,6 +127,7 @@ func (m *menu) draw() error {
 	fmt.Println(strings.Repeat("─", 52))
 	fmt.Printf(" 服务 : %s\n", svc)
 	fmt.Printf(" 监听 : %s（%s）\n", cfg.Listen, where)
+	fmt.Printf(" 入口 : %s\n", accessHint(cfg.AccessPath))
 	fmt.Printf(" BBR  : %s\n", bbrText)
 	if portStr == "" {
 		fmt.Println(" 提示 : 监听地址里没有端口，请到第 6 项重新设置")
@@ -134,8 +143,18 @@ func (m *menu) draw() error {
 	fmt.Println("  8) BBR 加速开关")
 	fmt.Println("  9) 显示面板信息")
 	fmt.Println(" 10) 重启服务器")
+	fmt.Println(" 11) 修改 SSH 端口")
+	fmt.Println(" 12) 面板访问后缀（隐藏登录入口）")
 	fmt.Println("  0) 退出")
 	return nil
+}
+
+// accessHint 是菜单顶部的一行摘要。
+func accessHint(path string) string {
+	if path == "" {
+		return "根路径 /（建议设置访问后缀）"
+	}
+	return "/" + path + "/"
 }
 
 func (m *menu) action(fn func() error) {
@@ -545,10 +564,14 @@ func (m *menu) showInfo() error {
 	fmt.Printf("数据库    : %s\n", cfg.DBPath)
 	fmt.Printf("会话超时  : %s\n", cfg.SessionTTL)
 	fmt.Printf("文件根目录: %s\n", cfg.FileRoot)
+	fmt.Printf("访问后缀  : %s\n", accessHint(cfg.AccessPath))
 
 	_, portStr, _ := splitListen(cfg.Listen)
 	if port, err := strconv.Atoi(portStr); err == nil {
 		for _, u := range manage.AccessURLs(manage.AccessHosts(), port, !cfg.IsLoopback()) {
+			if cfg.AccessPath != "" {
+				u += "/" + cfg.AccessPath + "/"
+			}
 			fmt.Println("访问地址  :", u)
 		}
 	}
@@ -591,6 +614,164 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// ---------- SSH 端口 ----------
+
+func (m *menu) setSSHPort() error {
+	cur := manage.CurrentSSHPorts()
+	parts := make([]string, len(cur))
+	for i, p := range cur {
+		parts[i] = strconv.Itoa(p)
+	}
+	fmt.Printf("当前 SSH 端口: %s\n", strings.Join(parts, ", "))
+	fmt.Println("改端口能直接把 22 端口上的爆破噪声降到近乎为零；")
+	fmt.Println("但改完必须用新端口能登录才算成功。")
+
+	def := strconv.Itoa(randomPort())
+	val, err := m.askDefault("新端口（回车用建议值）", def)
+	if err != nil {
+		return err
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(val))
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("端口应在 1–65535 之间，收到 %q", val)
+	}
+
+	m.warn("只 reload 不 restart，当前 SSH 会话不会断开；但请先另开一个窗口备用")
+	if !m.confirm(fmt.Sprintf("把 SSH 端口改成 %d？", port)) {
+		m.note("已取消")
+		return nil
+	}
+
+	res, err := manage.SetSSHPort(m.cfgPath, port)
+	if err != nil {
+		return err
+	}
+	if !res.Changed {
+		m.note("端口没有变化，仍是 %d", port)
+		return nil
+	}
+	m.ok("sshd 配置已更新（备份 %s）", filepath.Base(res.Backup))
+	if res.Service != "" {
+		m.ok("%s 已重载", res.Service)
+	}
+	if res.Firewall {
+		m.ok("防火墙已放行 %d/tcp", port)
+	}
+	if res.ConfigSaved {
+		m.ok("面板配置 ssh_ports 已登记为 %d", port)
+	}
+	for _, w := range res.Warnings {
+		m.warn("%s", w)
+	}
+	fmt.Printf("\n验证：ssh -p %d root@<本机IP>\n", port)
+	fmt.Println("成功登录之后再关掉当前窗口。")
+	return nil
+}
+
+// randomPort 给一个 20000–59999 的建议端口，避开常见服务与特权端口。
+func randomPort() int {
+	b := make([]byte, 2)
+	if _, err := rand.Read(b); err != nil {
+		return 22222
+	}
+	return 20000 + int(binary.BigEndian.Uint16(b))%40000
+}
+
+// ---------- 访问后缀 ----------
+
+func (m *menu) setAccessPath() error {
+	cfg, err := config.Load(m.cfgPath)
+	if err != nil {
+		return err
+	}
+	cur := cfg.AccessPath
+	if cur == "" {
+		fmt.Println("当前访问后缀: 未启用（任何路径都能打开登录页）")
+	} else {
+		fmt.Printf("当前访问后缀: /%s/\n", cur)
+	}
+
+	fmt.Println(" 1) 随机生成（推荐）")
+	fmt.Println(" 2) 自定义")
+	fmt.Println(" 3) 关闭")
+	fmt.Println(" 0) 返回")
+	choice, err := m.askDefault("选择", "0")
+	if err != nil {
+		return err
+	}
+
+	var next string
+	switch choice {
+	case "0":
+		return nil
+	case "1":
+		next = randomTag(16)
+	case "2":
+		v, err := m.ask("后缀（字母/数字/. _ ~ -，2–64 位）")
+		if err != nil {
+			return err
+		}
+		next = v
+	case "3":
+		next = ""
+	default:
+		return fmt.Errorf("选择只能是 0–3，收到 %q", choice)
+	}
+	next = config.NormalizeAccessPath(next)
+	if err := config.ValidateAccessPath(next); err != nil {
+		return err
+	}
+	if next == cur {
+		m.note("没有变化")
+		return nil
+	}
+
+	if err := config.PatchScalar(m.cfgPath, "access_path", strconv.Quote(next)); err != nil {
+		return fmt.Errorf("写入配置失败: %w", err)
+	}
+	if next == "" {
+		m.ok("访问后缀已关闭，重启后所有路径恢复可访问")
+	} else {
+		m.ok("访问后缀已写入配置: /%s/", next)
+		fmt.Println("     重启后只有带这个前缀的地址才能打开面板，其余路径一律 404")
+	}
+
+	if !manage.HasSystemd() {
+		m.note("未检测到 systemd，请手动重启面板让配置生效")
+		return nil
+	}
+	if err := manage.Restart(); err != nil {
+		return err
+	}
+	if m.waitActive(15 * time.Second) {
+		m.ok("面板已重启")
+	} else {
+		m.warn("面板没有在 15 秒内恢复，请用第 5 项看日志")
+	}
+
+	_, portStr, _ := splitListen(cfg.Listen)
+	port, _ := strconv.Atoi(portStr)
+	for _, u := range manage.AccessURLs(manage.AccessHosts(), port, !cfg.IsLoopback()) {
+		if next != "" {
+			u += "/" + next + "/"
+		}
+		fmt.Println("     访问地址:", u)
+	}
+	return nil
+}
+
+// randomTag 生成 n 位十六进制随机串，用作访问后缀。
+func randomTag(n int) string {
+	if n%2 == 1 {
+		n++
+	}
+	b := make([]byte, n/2)
+	if _, err := rand.Read(b); err != nil {
+		return "panelvps"
+	}
+	return hex.EncodeToString(b)
 }
 
 // isTerminal 判断标准输入是不是终端。

@@ -31,6 +31,7 @@ import (
 
 	"github.com/Everything-is-one/panelvps/internal/auth"
 	"github.com/Everything-is-one/panelvps/internal/config"
+	"github.com/Everything-is-one/panelvps/internal/firewall"
 	"github.com/Everything-is-one/panelvps/internal/relay"
 	"github.com/Everything-is-one/panelvps/internal/server"
 	"github.com/Everything-is-one/panelvps/internal/store"
@@ -287,6 +288,11 @@ func runServe(cfgPath string) error {
 		defer t.Stop()
 		for range t.C {
 			srv.SSHGuardTick(context.Background())
+			// iptables 后端没有「到期自动解除」，靠这里清理；
+			// nft 由内核按元素 timeout 自己过期，这一步是空转。
+			if n, err := firewall.SweepExpiredBans(); err == nil && n > 0 {
+				logger.Info("清理到期的封禁规则", "count", n)
+			}
 		}
 	}()
 

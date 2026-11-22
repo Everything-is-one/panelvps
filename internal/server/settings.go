@@ -32,6 +32,36 @@ func (s *Server) settingOr(ctx context.Context, key, def string) string {
 	return v
 }
 
+// loadRuntimeSettings 把设置表里的运行期开关套到内存。
+//
+// 这些值原先只在设置页展示、保存后改内存，重启就从配置文件回默认值——
+// 用户改过的阈值重启后悄悄变回去，比没有这个开关更糟。启动时统一回填一次。
+func (s *Server) loadRuntimeSettings(ctx context.Context) {
+	if v, err := s.st.GetSetting(ctx, "ssh_guard_enabled"); err == nil && v != "" {
+		s.cfg.SSHGuardEnabled = v == "1"
+	}
+	if v, err := s.st.GetSetting(ctx, "ssh_guard_threshold"); err == nil {
+		if n, err := strconv.Atoi(v); err == nil && n >= 3 && n <= 100 {
+			s.cfg.SSHGuardThreshold = n
+		}
+	}
+	if v, err := s.st.GetSetting(ctx, "ssh_guard_perma_threshold"); err == nil {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			s.permaThreshold.Store(int32(n))
+		}
+	}
+	if v, err := s.st.GetSetting(ctx, "geoip"); err == nil && v != "" {
+		s.geoOn.Store(v == "1")
+	}
+}
+
+func boolFlag(v bool) string {
+	if v {
+		return "1"
+	}
+	return "0"
+}
+
 func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	guardOn := s.cfg.SSHGuardEnabled
@@ -73,14 +103,17 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 	ok(w, map[string]any{
 		"public_host":   s.publicHost(r),
 		"alert_webhook": s.cfg.AlertWebhook,
+		"access_path":   s.currentAccessPath(),
+		"geoip":         s.geoOn.Load(),
 		"access":        access,
 		"account":       account,
 		"ssh_guard": map[string]any{
-			"enabled":   guardOn,
-			"threshold": threshold,
-			"window":    s.cfg.SSHGuardWindow,
-			"ban":       s.cfg.SSHGuardBan,
-			"ssh_ports": s.effectiveSSHPorts(),
+			"enabled":         guardOn,
+			"threshold":       threshold,
+			"perma_threshold": int(s.permaThreshold.Load()),
+			"window":          s.cfg.SSHGuardWindow,
+			"ban":             s.cfg.SSHGuardBan,
+			"ssh_ports":       s.effectiveSSHPorts(),
 		},
 		"panel": map[string]any{
 			"version":          version.Version,
@@ -107,7 +140,11 @@ type settingsReq struct {
 	AlertWebhook    *string `json:"alert_webhook"`
 	SSHGuard        *bool   `json:"ssh_guard_enabled"`
 	SSHThreshold    *int    `json:"ssh_guard_threshold"`
+	SSHPermaThresh  *int    `json:"ssh_guard_perma_threshold"`
 	TerminalEnabled *bool   `json:"terminal_enabled"`
+	// AccessPath 访问后缀，空字符串表示关闭。
+	AccessPath *string `json:"access_path"`
+	GeoIP      *bool   `json:"geoip"`
 }
 
 func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) {
@@ -173,6 +210,54 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		changed = append(changed, "ssh_guard_threshold")
+	}
+
+	if req.SSHPermaThresh != nil {
+		n := *req.SSHPermaThresh
+		// 0 表示关闭永久封禁；不为负，也不允许低于普通阈值（那样所有人都是永久）
+		if n < 0 || n > 100000 {
+			fail(w, http.StatusBadRequest, codeBadRequest, "永久封禁阈值不合法")
+			return
+		}
+		if n > 0 && n < s.cfg.SSHGuardThreshold {
+			fail(w, http.StatusBadRequest, codeBadRequest, "永久封禁阈值不能小于普通阈值")
+			return
+		}
+		s.permaThreshold.Store(int32(n))
+		if err := s.st.SetSetting(ctx, "ssh_guard_perma_threshold", strconv.Itoa(n)); err != nil {
+			fail(w, http.StatusInternalServerError, codeInternalError, "保存失败")
+			return
+		}
+		changed = append(changed, "ssh_guard_perma_threshold")
+	}
+
+	// 访问后缀会改变所有页面的入口，必须写回配置文件，否则重启就丢。
+	if req.AccessPath != nil {
+		v := config.NormalizeAccessPath(*req.AccessPath)
+		if err := config.ValidateAccessPath(v); err != nil {
+			fail(w, http.StatusBadRequest, codeBadRequest, err.Error())
+			return
+		}
+		if s.cfg.Path() == "" {
+			fail(w, http.StatusInternalServerError, codeInternalError, "无法定位配置文件")
+			return
+		}
+		// 用 %q 写成带引号的 YAML 标量：空串也写成 ""，语义明确
+		if err := config.PatchScalar(s.cfg.Path(), "access_path", strconv.Quote(v)); err != nil {
+			fail(w, http.StatusInternalServerError, codeInternalError, "写入配置文件失败: "+err.Error())
+			return
+		}
+		s.setAccessPath(v)
+		changed = append(changed, "access_path")
+	}
+
+	if req.GeoIP != nil {
+		s.geoOn.Store(*req.GeoIP)
+		if err := s.st.SetSetting(ctx, "geoip", boolFlag(*req.GeoIP)); err != nil {
+			fail(w, http.StatusInternalServerError, codeInternalError, "保存失败")
+			return
+		}
+		changed = append(changed, "geoip")
 	}
 
 	if req.TerminalEnabled != nil {

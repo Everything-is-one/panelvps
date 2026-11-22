@@ -21,6 +21,53 @@ const userCtxKey ctxKey = "user"
 const sessCtxKey ctxKey = "session"
 const csrfCtxKey ctxKey = "csrf"
 
+// withAccessPath 实现「访问后缀」。
+//
+// 启用后，只有 /<后缀>/... 能进来，其余路径一律 404 —— 包括根路径与
+// /api/v1/auth/login。扫描器敲 /、/.env、/wp-login.php 收到的都是同一个
+// 404，看不出这里装了个面板，也就不值得继续试。
+//
+// 这是收窄暴露面，不是认证：密码、限流、HTTPS 仍然是真正的防线。
+func (s *Server) withAccessPath(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		base := s.currentAccessPath()
+		if base == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		prefix := "/" + base
+		p := r.URL.Path
+		switch {
+		case p == "/healthz":
+			// 健康检查保持原样：脚本与监控用的，不暴露任何页面内容
+			next.ServeHTTP(w, r)
+		case p == prefix:
+			r2 := r.Clone(r.Context())
+			r2.URL.Path = "/"
+			next.ServeHTTP(w, r2)
+		case strings.HasPrefix(p, prefix+"/"):
+			r2 := r.Clone(r.Context())
+			r2.URL.Path = strings.TrimPrefix(p, prefix)
+			next.ServeHTTP(w, r2)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// currentAccessPath 返回生效中的访问后缀（不含斜杠），空表示未启用。
+func (s *Server) currentAccessPath() string {
+	if v, ok := s.accessPath.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
+// setAccessPath 立即切换访问后缀。
+func (s *Server) setAccessPath(v string) {
+	s.accessPath.Store(v)
+}
+
 // withRecover 捕获 panic，返回 500 而不是让进程崩掉。
 func (s *Server) withRecover(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

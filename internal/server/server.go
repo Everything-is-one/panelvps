@@ -15,12 +15,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Everything-is-one/panelvps/internal/auth"
 	"github.com/Everything-is-one/panelvps/internal/backup"
 	"github.com/Everything-is-one/panelvps/internal/config"
 	"github.com/Everything-is-one/panelvps/internal/filemgr"
+	"github.com/Everything-is-one/panelvps/internal/geoip"
 	"github.com/Everything-is-one/panelvps/internal/jobs"
 	"github.com/Everything-is-one/panelvps/internal/metrics"
 	"github.com/Everything-is-one/panelvps/internal/notify"
@@ -73,6 +75,15 @@ type Server struct {
 	jobs     *jobs.Manager
 	relays   *relay.Manager
 	disk     *metrics.DiskScanner
+	geo      *geoip.Resolver
+
+	// accessPath 是生效中的访问后缀。放在这里而不是只读 cfg：
+	// 设置页改完要立即生效，而配置结构体会被多个 goroutine 同时读，
+	// 直接改字段就是数据竞争。用 atomic 存一份字符串，读写都无锁。
+	accessPath atomic.Value // string
+	// permaThreshold / geoOn 同理：设置页可改，后台任务要读。
+	permaThreshold atomic.Int32
+	geoOn          atomic.Bool
 
 	termMu     sync.Mutex
 	termTicket map[string]time.Time
@@ -177,6 +188,12 @@ func New(cfg *config.Config, st *store.Store, logger *slog.Logger) (*Server, err
 	s.jobs = jobs.New(60, 2)
 	s.termTicket = map[string]time.Time{}
 	s.disk = metrics.NewDiskScanner()
+	s.geo = geoip.New()
+	s.accessPath.Store(cfg.AccessPath)
+	s.permaThreshold.Store(int32(cfg.SSHGuardPermaThreshold))
+	s.geoOn.Store(cfg.GeoIPEnabled)
+	// 设置表里的运行期开关优先于配置文件（与设置页展示的值保持一致）
+	s.loadRuntimeSettings(context.Background())
 
 	// 中转规则随面板启动恢复。转发引擎不依赖 Xray，也不依赖任何外部
 	// 程序，所以这里可以同步启动：失败只影响对应规则，不会拖住面板。
@@ -320,6 +337,7 @@ func (s *Server) Handler() http.Handler {
 	h = s.withSecurityHeaders(h)
 	h = s.withBodyLimit(h)
 	h = s.withRecover(h)
+	h = s.withAccessPath(h)
 	h = s.withAccessLog(h)
 	return h
 }
@@ -413,6 +431,17 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	// 首页每次都重新取，并把版本号注入脚本地址：升级后 URL 变化，
 	// 浏览器不会继续用上一版缓存的前端脚本（曾出现「升级了但界面没变」）。
 	if upath == "index.html" {
+		base := s.currentAccessPath()
+		if base != "" {
+			// 静态资源统一加上访问后缀，否则浏览器会去 /app.js 拿文件，
+			// 而那条路径已经被 404 了。
+			raw = bytes.ReplaceAll(raw, []byte(`="/`), []byte(`="/`+base+`/`))
+		}
+		// 前端需要知道后缀才能拼接口地址。用 <meta> 而不是内联 <script>：
+		// CSP 里 script-src 只允许 'self'，内联脚本会被直接拦掉。
+		meta := []byte(`<meta name="pv-base" content="/` + base + `">`)
+		raw = bytes.ReplaceAll(raw, []byte("</head>"), append(meta, []byte("</head>")...))
+
 		q := []byte("?v=" + version.Version)
 		raw = bytes.ReplaceAll(raw, []byte(`/app.js"`), append(append([]byte("/app.js"), q...), '"'))
 		raw = bytes.ReplaceAll(raw, []byte(`/app.css"`), append(append([]byte("/app.css"), q...), '"'))

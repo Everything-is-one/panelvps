@@ -14,10 +14,17 @@ import (
 
 // handleSystemInfo 返回主机概况与面板运行参数。
 func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+	// 时区名 + 当前偏移 + 服务器本地时间：只报时区名时，用户看到
+	// 「Asia/Shanghai」还得自己算几点，出问题时对不上日志时间戳。
+	_, offset := now.Zone()
 	ok(w, map[string]any{
 		"os":       sysinfo.Info(),
 		"cgroup":   sysinfo.CgroupVersion(),
 		"timezone": systemTimezone(),
+		"tz_offset_sec": offset,
+		"local_time":    now.Format("2006-01-02 15:04:05"),
+		"unix":          now.Unix(),
 		"metrics":  s.metrics.Collect(),
 		"panel": map[string]any{
 			"version":          version.Version,

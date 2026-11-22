@@ -174,6 +174,8 @@ func (s *Server) panelPort() int {
 type banReq struct {
 	IP      string `json:"ip"`
 	Minutes int    `json:"minutes"`
+	// Permanent 为 true 时忽略 minutes，直接长期封禁（十年，见 firewall.permaTTL）。
+	Permanent bool `json:"permanent"`
 }
 
 func (s *Server) handleBanCreate(w http.ResponseWriter, r *http.Request) {
@@ -186,16 +188,24 @@ func (s *Server) handleBanCreate(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, codeBadRequest, "IP 非法")
 		return
 	}
-	minutes := req.Minutes
-	if minutes <= 0 || minutes > 43200 {
-		minutes = 60
+	ttl := time.Duration(0) // 0 表示永久
+	if !req.Permanent {
+		minutes := req.Minutes
+		if minutes <= 0 || minutes > 43200 {
+			minutes = 60
+		}
+		ttl = time.Duration(minutes) * time.Minute
 	}
-	if err := firewall.Ban(req.IP, time.Duration(minutes)*time.Minute); err != nil {
+	if err := firewall.Ban(req.IP, ttl); err != nil {
 		fail(w, http.StatusBadRequest, codeBadRequest, err.Error())
 		return
 	}
-	s.audit(r, "firewall_ban", req.IP, strconv.Itoa(minutes)+" 分钟")
-	ok(w, map[string]any{"ok": true})
+	detail := "永久"
+	if ttl > 0 {
+		detail = ttl.String()
+	}
+	s.audit(r, "firewall_ban", req.IP, detail)
+	ok(w, map[string]any{"ok": true, "permanent": ttl == 0})
 }
 
 func (s *Server) handleBanDelete(w http.ResponseWriter, r *http.Request) {
@@ -289,18 +299,30 @@ func (s *Server) SSHGuardTick(ctx context.Context) {
 		if n < s.cfg.SSHGuardThreshold || existing[ip] {
 			continue
 		}
-		if err := firewall.Ban(ip, banDur); err != nil {
+		// 过了硬线就直接长期拉黑：临时封禁对「试完一万次再等一小时」的
+		// 扫描器没有意义，放出来它还会接着打。
+		permaLine := int(s.permaThreshold.Load())
+		permanent := permaLine > 0 && n >= permaLine
+		ttl := banDur
+		if permanent {
+			ttl = 0
+		}
+		if err := firewall.Ban(ip, ttl); err != nil {
 			s.logger.Warn("SSH 自动封禁失败", "ip", ip, "err", err)
 			continue
 		}
-		s.logger.Warn("SSH 爆破达到阈值，已自动封禁", "ip", ip, "fails", n, "ban", banDur.String())
+		label := banDur.String()
+		if permanent {
+			label = "永久"
+		}
+		s.logger.Warn("SSH 爆破达到阈值，已自动封禁", "ip", ip, "fails", n, "ban", label)
 		_ = s.st.Audit(ctx, "system", "ssh_guard_ban", ip,
-			"窗口内失败 "+strconv.Itoa(n)+" 次", "firewall")
+			"窗口内失败 "+strconv.Itoa(n)+" 次，封禁 "+label, "firewall")
 		if s.notifier != nil {
 			s.notifier.Send(notify.Event{
 				Level:  "warn",
 				Title:  "SSH 爆破自动封禁",
-				Detail: ip + " 在 " + window.String() + " 内失败 " + strconv.Itoa(n) + " 次，已封禁 " + banDur.String(),
+				Detail: ip + " 在 " + window.String() + " 内失败 " + strconv.Itoa(n) + " 次，已封禁 " + label,
 			})
 		}
 	}

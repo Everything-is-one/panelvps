@@ -75,6 +75,18 @@ type Config struct {
 	SSHGuardWindow string `yaml:"ssh_guard_window"`
 	// SSHGuardBan 封禁时长，如 "1h"。
 	SSHGuardBan string `yaml:"ssh_guard_ban"`
+	// SSHGuardPermaThreshold 窗口内失败次数达到该值时改为永久封禁，0 表示关闭。
+	//
+	// 临时封禁对分布式爆破够用，但对同一个 IP 反复尝试上万次的场景没有意义：
+	// 放出来它还在。所以给一条硬线，过了就长期拉黑，由用户手动解封。
+	SSHGuardPermaThreshold int `yaml:"ssh_guard_perma_threshold"`
+	// AccessPath 面板访问后缀。非空时所有请求必须带 /<access_path> 前缀，
+	// 否则一律 404——扫描器连登录页都看不到，减少被撞库与被扫面的机会。
+	//
+	// 这是「减少暴露面」而不是认证手段：真正的防线仍是密码、限流与 SSL。
+	AccessPath string `yaml:"access_path"`
+	// GeoIPEnabled 是否为攻击记录解析 IP 归属地（需要出网，失败只降级不报错）。
+	GeoIPEnabled bool `yaml:"geoip_enabled"`
 	// SSHPorts 允许的 SSH 端口，防火墙模块会强制放行，避免把自己锁在外面。
 	SSHPorts []int `yaml:"ssh_ports"`
 	// UpdateRepo 自更新的 GitHub 仓库，形如 owner/repo。
@@ -115,6 +127,8 @@ func Default() *Config {
 		SSHGuardThreshold: 5,
 		SSHGuardWindow:    "10m",
 		SSHGuardBan:       "1h",
+		SSHGuardPermaThreshold: 10,
+		GeoIPEnabled:      true,
 		SSHPorts:          []int{22},
 		UpdateRepo:        "Everything-is-one/panelvps",
 		TerminalShell:     "/bin/bash",
@@ -199,6 +213,10 @@ func (c *Config) applyDefaults() {
 	if c.SSHGuardBan == "" {
 		c.SSHGuardBan = "1h"
 	}
+	if c.SSHGuardPermaThreshold < 0 {
+		c.SSHGuardPermaThreshold = 0
+	}
+	c.AccessPath = NormalizeAccessPath(c.AccessPath)
 	if len(c.SSHPorts) == 0 {
 		c.SSHPorts = []int{22}
 	}
@@ -295,6 +313,9 @@ func (c *Config) Validate() error {
 		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 			return fmt.Errorf("update_repo 应形如 owner/repo，当前为 %q", c.UpdateRepo)
 		}
+	}
+	if err := ValidateAccessPath(c.AccessPath); err != nil {
+		return err
 	}
 	return nil
 }
