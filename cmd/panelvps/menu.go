@@ -430,6 +430,12 @@ func (m *menu) resetPassword() error {
 	default:
 		return fmt.Errorf("选择只能是 1 或 2，收到 %q", mode)
 	}
+
+	// 把改的是哪个库印出来。Web 端登不上时最需要的就是这一行：
+	// 它和服务 `panelvps info` 里「实际打开」的路径一对照就知道有没有改错库。
+	if cfg, err := config.Load(m.cfgPath); err == nil {
+		fmt.Printf("     已写入数据库: %s\n", cfg.DBPath)
+	}
 	return nil
 }
 
@@ -499,6 +505,10 @@ func savePassword(st *store.Store, u *store.User, pwd string, mustChange bool) e
 	}
 	_, _ = st.DB().ExecContext(ctx, `UPDATE users SET must_change_password = ? WHERE id = ?`, flag, u.ID)
 	_ = st.DeleteUserSessions(ctx, u.ID)
+	// 回读校验：写进影子库、只读副本、事务没提交都会「看起来成功」。
+	if err := confirmPassword(st, u.ID, pwd); err != nil {
+		return err
+	}
 	_ = st.Audit(ctx, "cli", "password_reset", "user", u.Username, "menu")
 	return nil
 }

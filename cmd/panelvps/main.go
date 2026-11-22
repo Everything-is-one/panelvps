@@ -65,6 +65,8 @@ func main() {
 	fs := flag.NewFlagSet("panelvps "+cmd, flag.ExitOnError)
 	cfgPath := fs.String("config", defaultConfigPath(), "配置文件路径")
 	username := fs.String("user", "admin", "管理员用户名")
+	dbOverride := fs.String("db", "", "直接指定数据库文件，跳过配置文件里的 data_dir 推导（救急用）")
+	newPassword := fs.String("password", "", "指定新密码，留空则随机生成（仅 reset-password 使用）")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `PanelVPS %s
 
@@ -75,11 +77,14 @@ func main() {
   menu              管理菜单：启停、端口、重置密码、BBR、重启（默认）
   serve             前台启动服务
   version           打印版本信息
-  info              打印配置与账号概况
+  info              打印配置、运行中的服务与数据库体检
   init              创建管理员账号（已存在则跳过）
   reset-password    重置管理员密码为随机值
   relay             前台运行一条端口转发（不需要配置文件与数据库）
                     panelvps relay -listen :8443 -to 1.2.3.4:443 [-udp]
+
+忘记密码时先看 info：它会把「服务实际打开的数据库」和配置解析出的
+数据库都列出来。两者不一致时，用 -db 指向服务在用的那个。
 
 不带命令直接运行 panelvps 会打开管理菜单；没有终端时按 serve 处理。
 
@@ -98,11 +103,11 @@ func main() {
 	case "version":
 		fmt.Printf("panelvps %s (commit %s, built %s)\n", version.Version, version.Commit, version.BuildAt)
 	case "info":
-		err = runInfo(*cfgPath)
+		err = runInfo(*cfgPath, *dbOverride)
 	case "init":
-		err = runInit(*cfgPath, *username)
+		err = runInit(*cfgPath, *username, *dbOverride)
 	case "reset-password":
-		err = runResetPassword(*cfgPath, *username)
+		err = runResetPassword(*cfgPath, *username, *dbOverride, *newPassword)
 	default:
 		fs.Usage()
 		os.Exit(2)
@@ -377,52 +382,72 @@ func printInitialPassword(logger *slog.Logger, username, password string) {
 	fmt.Printf("========================================\n\n")
 }
 
-func runInfo(cfgPath string) error {
+// openStoreFor 打开 CLI 要操作的数据库，同时返回实际使用的路径。
+//
+// dbOverride 非空时直连那个文件，连配置文件都不要求存在——「密码登不上、
+// 配置也读不出个所以然」正是它存在的场景。此时 DataDir 之类只用来展示，
+// 不能反过来影响库的选择。
+//
+// 返回的 path 是**真正被打开**的文件，打印时一律用它：用 cfg.DBPath 会出现
+// 「说改的是 A、实际改的是 B」这种更让人头大的输出。
+func openStoreFor(cfgPath, dbOverride string) (*store.Store, *config.Config, string, error) {
+	if dbOverride != "" {
+		abs, err := filepath.Abs(dbOverride)
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("解析 -db 路径失败: %w", err)
+		}
+		if fi, err := os.Stat(abs); err != nil {
+			return nil, nil, "", fmt.Errorf("数据库 %s 不存在: %w", abs, err)
+		} else if fi.IsDir() {
+			return nil, nil, "", fmt.Errorf("数据库 %s 是目录，应该是 .db 文件", abs)
+		}
+		cfg, _ := config.Load(cfgPath) // 读不到也无妨，只用于展示
+		st, err := store.Open(abs)
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("打开数据库 %s 失败: %w", abs, err)
+		}
+		return st, cfg, abs, nil
+	}
+
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		return err
+		return nil, nil, "", err
 	}
-	fmt.Printf("版本      : %s (%s)\n", version.Version, version.Commit)
-	fmt.Printf("配置文件  : %s\n", cfgPath)
-	fmt.Printf("监听地址  : %s%s\n", cfg.Listen, map[bool]string{true: "  [仅本机]", false: "  [已对外]"}[cfg.IsLoopback()])
-	fmt.Printf("数据目录  : %s\n", cfg.DataDir)
-	fmt.Printf("数据库    : %s\n", cfg.DBPath)
-	fmt.Printf("会话超时  : %s\n", cfg.SessionTTL)
-	fmt.Printf("文件根目录: %s\n", cfg.FileRoot)
-	fmt.Printf("终端功能  : %v\n", cfg.TerminalEnabled)
+	st, err := store.Open(cfg.DBPath)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("打开数据库 %s 失败（面板正在运行时也可能出现，稍后重试）: %w", cfg.DBPath, err)
+	}
+	return st, cfg, cfg.DBPath, nil
+}
 
-	if _, err := os.Stat(cfg.DBPath); err == nil {
-		st, err := store.Open(cfg.DBPath)
-		if err != nil {
-			return err
-		}
-		defer st.Close()
-		ctx := context.Background()
-		if n, err := st.CountUsers(ctx); err == nil {
-			fmt.Printf("账号数量  : %d\n", n)
-		}
-		if n, err := st.AuditCount(ctx); err == nil {
-			fmt.Printf("审计条数  : %d\n", n)
-		}
-		if fi, err := os.Stat(cfg.DBPath); err == nil {
-			fmt.Printf("数据库大小: %.1f KB\n", float64(fi.Size())/1024)
-		}
-	} else {
-		fmt.Printf("数据库    : 尚未初始化（首次 serve 时创建）\n")
+// confirmPassword 写完立刻回读校验。
+//
+// 存在的意义：密码改动有几个「静默成功」的失败模式——写到影子库、库是只读
+// 副本、事务没提交。它们都不会报错，只会让人反复试密码。回读一次再拿明文
+// 走一遍完整的 argon2 校验，通过才算真的改成功。
+func confirmPassword(st *store.Store, userID int64, pwd string) error {
+	ctx := context.Background()
+	u, err := st.UserByID(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("回读账号失败: %w", err)
+	}
+	ok, err := auth.VerifyPassword(pwd, u.PasswordHash)
+	if err != nil {
+		return fmt.Errorf("回读的密码哈希无法校验: %w", err)
+	}
+	if !ok {
+		return errors.New("写入后校验没通过：数据库里的哈希与新密码不匹配")
 	}
 	return nil
 }
 
-func runInit(cfgPath, username string) error {
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		return err
-	}
-	st, err := store.Open(cfg.DBPath)
+func runInit(cfgPath, username, dbOverride string) error {
+	st, _, dbPath, err := openStoreFor(cfgPath, dbOverride)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
+	fmt.Printf("数据库    : %s\n", dbPath)
 
 	ctx := context.Background()
 	if _, err := st.UserByUsername(ctx, username); err == nil {
@@ -438,30 +463,36 @@ func runInit(cfgPath, username string) error {
 	return nil
 }
 
-func runResetPassword(cfgPath, username string) error {
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		return err
-	}
-	st, err := store.Open(cfg.DBPath)
+func runResetPassword(cfgPath, username, dbOverride, explicit string) error {
+	st, _, dbPath, err := openStoreFor(cfgPath, dbOverride)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
+	fmt.Printf("数据库    : %s\n", dbPath)
 
 	ctx := context.Background()
 	u, err := st.UserByUsername(ctx, username)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("账号 %s 不存在，请先执行 panelvps init", username)
+			return fmt.Errorf("这个库里没有账号 %s。先用 panelvps info 确认服务在用的是哪个库，"+
+				"再执行 panelvps reset-password -db <那个库> -user %s", username, username)
 		}
 		return err
 	}
 
-	pwd, err := auth.RandomPassword(20)
-	if err != nil {
+	pwd := explicit
+	mustChange := false
+	if pwd == "" {
+		pwd, err = auth.RandomPassword(20)
+		if err != nil {
+			return err
+		}
+		mustChange = true
+	} else if err := auth.ValidatePassword(pwd, username); err != nil {
 		return err
 	}
+
 	hash, err := auth.HashPassword(pwd)
 	if err != nil {
 		return err
@@ -469,12 +500,24 @@ func runResetPassword(cfgPath, username string) error {
 	if err := st.UpdatePassword(ctx, u.ID, hash); err != nil {
 		return err
 	}
-	// 重置后强制改密，并踢掉所有在线会话
-	_, _ = st.DB().ExecContext(ctx, `UPDATE users SET must_change_password = 1 WHERE id = ?`, u.ID)
+	// 重置后强制改密（随机密码时），并踢掉所有在线会话
+	flag := 0
+	if mustChange {
+		flag = 1
+	}
+	_, _ = st.DB().ExecContext(ctx, `UPDATE users SET must_change_password = ? WHERE id = ?`, flag, u.ID)
 	_ = st.DeleteUserSessions(ctx, u.ID)
+
+	if err := confirmPassword(st, u.ID, pwd); err != nil {
+		return err
+	}
 	_ = st.Audit(ctx, "cli", "password_reset", "user", username, "local")
 
 	fmt.Printf("已重置 %s 的密码: %s\n", username, pwd)
-	fmt.Println("所有在线会话已失效，登录后必须修改密码")
+	if mustChange {
+		fmt.Println("登录后必须修改密码")
+	}
+	fmt.Println("所有在线会话已失效，可以立即用上面的密码登录")
+	fmt.Printf("（改动已回读校验，落在这个库里：%s）\n", dbPath)
 	return nil
 }
