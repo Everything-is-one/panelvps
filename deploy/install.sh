@@ -182,6 +182,18 @@ env_report() {
             warn "  apt 会打一串「chmod ... failed - Operation not permitted」warning，"
             warn "  文件管理器改权限也会失败。重跑安装脚本，或到「设置 → 服务单元」覆盖后重启。"
         fi
+
+        # 上面 cap_has 查的是「当前这个 shell」能不能绑低端口，用的是 SSH 会话
+        # 的完整能力集，看不出单元本身有没有放行。两者的差别正是装 Nginx 失败的
+        # 原因：nginx -t 由面板拉起、继承单元的边界集，缺 BIND_SERVICE 就 EACCES。
+        if grep -q "CapabilityBoundingSet=.*CAP_NET_BIND_SERVICE" "$UNIT"; then
+            ok "能力集含 CAP_NET_BIND_SERVICE（校验 nginx -t、中转低端口可用）"
+        elif grep -q "CapabilityBoundingSet=" "$UNIT"; then
+            warn "单元的 CapabilityBoundingSet 没有 CAP_NET_BIND_SERVICE："
+            warn "  软件商店装 Nginx 会在最后一步 nginx -t 报 bind() to 0.0.0.0:80"
+            warn "  failed (13: Permission denied)，随后整单回滚。"
+            warn "  重跑安装脚本，或到「设置 → 服务单元」覆盖后重启面板。"
+        fi
     else
         warn "未找到服务单元：$UNIT"
     fi

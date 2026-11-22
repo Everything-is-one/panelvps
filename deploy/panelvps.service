@@ -63,8 +63,16 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 # CAP_FOWNER（CAP_CHOWN 只管改属主，不管改权限位）。少了它 apt 只打
 # warning 不中断，所以容易被当成噪音忽略 —— 但同样的权限会被文件管理器
 # 改权限、站点部署 chown/chmod 用到，早晚会撞上。
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_KILL CAP_SETUID CAP_SETGID
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_KILL CAP_SETUID CAP_SETGID
+#
+# CAP_NET_BIND_SERVICE 同理，缺了它装 Nginx 会「装成功却判失败」：
+#   nginx: [emerg] bind() to 0.0.0.0:80 failed (13: Permission denied)
+# 因为 nginx -t 要真开一遍监听套接字来验证配置，而它是面板的子进程，
+# 继承这份边界集。内核在 inet_bind 里先查端口权限、再查是否被占用，
+# 所以哪怕 nginx 自己（独立单元、完整能力）已经正常监听 80，面板这边
+# 依旧只得到 EACCES。面板还要直接绑低端口：中转规则常写 :443、
+# 面板自身 listen 也可能配成 :80。
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_KILL CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_KILL CAP_SETUID CAP_SETGID
 
 # 日志走 journald（PRD ADR-08）
 StandardOutput=journal
