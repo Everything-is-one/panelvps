@@ -4,6 +4,15 @@
 // 零构建：直接操作 DOM，不引入框架。
 // 安全约定：所有动态文本走 textContent，绝不拼接 innerHTML。
 
+// PV_BASE 是「访问后缀」，由 index.html 里的 <meta name="pv-base"> 注入。
+// 启用后面板只认 /<后缀>/... ，接口与静态资源都得带上它。
+const PV_BASE = (document.querySelector('meta[name="pv-base"]') || {}).content || "";
+
+// 拼接带访问后缀的绝对路径。
+function pvURL(path) {
+  return PV_BASE + path;
+}
+
 const state = {
   csrf: "",
   user: null,
@@ -102,7 +111,7 @@ async function api(method, path, body, opts) {
         headers["Content-Type"] = "application/json";
         headers["X-CSRF-Token"] = state.csrf || cookie("pv_csrf");
       }
-      const res = await fetch(path, {
+      const res = await fetch(pvURL(path), {
         method,
         headers,
         credentials: "same-origin",
@@ -840,23 +849,52 @@ function renderOverviewView(root) {
 
   const num = (v) => (typeof v === "number" && isFinite(v) ? v : 0);
 
+  // 本地时间的秒针。切页后 alive() 变假，下一拍自己停掉。
+  let clockTimer = null;
+
   // 主机信息基本不变，只取一次；资源指标才需要轮询
   const loadHost = async () => {
     try {
       const d = await api("GET", "/api/v1/system/info");
       if (!alive()) return;
       const o = d.os || {};
+      const tzName = d.timezone || "-";
+      const hasOffset = typeof d.tz_offset_sec === "number";
+      // Windows 开发环境下 time.Local 的名字就是 "Local"，没有参考价值，
+      // 这时只显示 UTC 偏移。
+      const tzText = !hasOffset ? tzName
+        : (tzName === "-" || tzName === "Local" ? fmtUTCOffset(d.tz_offset_sec)
+          : tzName + "（" + fmtUTCOffset(d.tz_offset_sec) + "）");
+      // 服务器时间每秒走一格：用「服务器时刻 - 本机时刻」的差值校正，
+      // 浏览器时区与服务器不一致时显示的仍是服务器本地时间。
+      const clock = el("td", { class: "mono" });
       const rows = [
         ["主机名", o.hostname],
         ["发行版", o.distro],
         ["内核", o.kernel],
         ["架构", o.arch],
         ["CPU 核数", o.cpu_cores ? String(o.cpu_cores) : "-"],
-        ["时区", d.timezone || "-"],
+        ["时区", tzText],
         ["运行环境", d.cgroup ? "cgroup " + d.cgroup : "-"],
       ];
       sysBody.replaceChildren.apply(sysBody, rows.map(([k, v]) =>
         el("tr", {}, [el("th", { text: k }), el("td", { class: "mono", text: String(v || "-") })])));
+      // 时间行单独插，之后只改文本不再重建表格
+      sysBody.appendChild(el("tr", {}, [el("th", { text: "本地时间" }), clock]));
+      if (typeof d.unix === "number" && d.unix > 0) {
+        const drift = d.unix * 1000 - Date.now();
+        const tick = () => {
+          if (!alive()) { clearInterval(clockTimer); return; }
+          clock.textContent = fmtClock(new Date(Date.now() + drift));
+        };
+        tick();
+        if (clockTimer) clearInterval(clockTimer);
+        clockTimer = setInterval(tick, 1000);
+      } else if (d.local_time) {
+        clock.textContent = d.local_time;
+      } else {
+        clock.textContent = "-";
+      }
     } catch (e) {
       if (!alive() || isCancel(e)) return;
       if (e.status === 401) { renderLogin("会话已失效，请重新登录"); return; }
@@ -1212,7 +1250,7 @@ function showLink(client) {
       el("button", { class: "ghost", text: "复制链接", onclick: (ev) => copyWithFeedback(ev.target, link, "已复制") }),
     ]),
     el("div", { class: "qr" }, [
-      el("img", { src: "/api/v1/proxies/clients/" + client.id + "/qr", alt: "二维码", width: "240", height: "240" }),
+      el("img", { src: pvURL("/api/v1/proxies/clients/" + client.id + "/qr"), alt: "二维码", width: "240", height: "240" }),
     ]),
   ]);
   if (!link) {
@@ -1697,6 +1735,22 @@ function fmtTime(s) {
     " " + p(d.getHours()) + ":" + p(d.getMinutes());
 }
 
+// fmtClock 把 Date 打成「YYYY-MM-DD HH:MM:SS」，用于系统环境里的本地时间。
+function fmtClock(d) {
+  const p = (n) => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
+    " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+}
+
+// fmtUTCOffset 把秒级偏移打成 UTC+08:00 / UTC-05:30。
+function fmtUTCOffset(sec) {
+  const sign = sec < 0 ? "-" : "+";
+  const abs = Math.abs(sec);
+  const h = Math.floor(abs / 3600);
+  const m = Math.floor((abs % 3600) / 60);
+  return "UTC" + sign + String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0");
+}
+
 function simpleTable(headers, rows) {
   return el("table", { class: "data" }, [
     el("thead", {}, [el("tr", {}, headers.map((h) => el("th", { text: h })))]),
@@ -1827,7 +1881,7 @@ function renderFilesView(root) {
     const q = paths.map((p) => "path=" + encodeURIComponent(p)).join("&");
     msg.className = "msg ok";
     msg.textContent = "正在打包 " + paths.length + " 项，浏览器随后开始下载…";
-    window.location.href = "/api/v1/files/batch-download?" + q;
+    window.location.href = pvURL("/api/v1/files/batch-download?" + q);
   };
 
   const packToServer = async () => {
@@ -1897,7 +1951,7 @@ function renderFilesView(root) {
             exitSearch();
           } }),
           e.is_dir ? null : el("button", { class: "link", text: "下载", onclick: () => {
-            window.location.href = "/api/v1/files/download?path=" + encodeURIComponent(e.path);
+            window.location.href = pvURL("/api/v1/files/download?path=" + encodeURIComponent(e.path));
           } }),
         ])]),
       ]);
@@ -1943,7 +1997,7 @@ function renderFilesView(root) {
     try {
       const data = await api("GET", "/api/v1/files/content?path=" + encodeURIComponent(path));
       if (data.binary) {
-        window.location.href = "/api/v1/files/download?path=" + encodeURIComponent(path);
+        window.location.href = pvURL("/api/v1/files/download?path=" + encodeURIComponent(path));
         return;
       }
       const ta = el("textarea", { class: "editor", spellcheck: "false" });
@@ -2117,7 +2171,7 @@ function renderFilesView(root) {
       });
       const actions = el("div", { class: "row" }, [
         e.is_dir ? null : el("button", { class: "link", text: "下载", onclick: () => {
-          window.location.href = "/api/v1/files/download?path=" + encodeURIComponent(e.path);
+          window.location.href = pvURL("/api/v1/files/download?path=" + encodeURIComponent(e.path));
         } }),
         el("button", { class: "link", text: "重命名", onclick: () => rename(e.path) }),
         el("button", { class: "link danger", text: "删除", onclick: () => removePaths([e.path]) }),
@@ -2208,7 +2262,7 @@ function renderFilesView(root) {
     msg.className = "msg";
     msg.textContent = "上传中…";
     try {
-      const res = await fetch("/api/v1/files/upload?path=" + encodeURIComponent(cwd), {
+      const res = await fetch(pvURL("/api/v1/files/upload?path=" + encodeURIComponent(cwd)), {
         method: "POST",
         body: fd,
         credentials: "same-origin",
@@ -2323,7 +2377,7 @@ function renderTerminalView(root) {
     try {
       const t = await api("POST", "/api/v1/terminal/ticket", {});
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      const ws = new WebSocket(proto + "://" + location.host + "/api/v1/terminal/ws?ticket=" +
+      const ws = new WebSocket(proto + "://" + location.host + pvURL("/api/v1/terminal/ws?ticket=") +
         encodeURIComponent(t.ticket) + "&cols=" + s.term.cols + "&rows=" + s.term.rows);
       s.ws = ws;
       ws.binaryType = "arraybuffer";
@@ -2529,7 +2583,7 @@ function renderTerminalFallback(root) {
       const t = await api("POST", "/api/v1/terminal/ticket", {});
       const dim = size();
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      ws = new WebSocket(proto + "://" + location.host + "/api/v1/terminal/ws?ticket=" +
+      ws = new WebSocket(proto + "://" + location.host + pvURL("/api/v1/terminal/ws?ticket=") +
         encodeURIComponent(t.ticket) + "&cols=" + dim.c + "&rows=" + dim.r);
       ws.binaryType = "arraybuffer";
       ws.onopen = () => { msg.className = "msg ok"; msg.textContent = "已连接（简化渲染）"; out.focus(); };
@@ -2609,6 +2663,7 @@ function renderSecurityView(root) {
     try {
       const data = await api("GET", "/api/v1/firewall");
       const st = data.status;
+      const permCount = (st.bans || []).filter((b) => b.permanent).length;
       statusBox.replaceChildren(
         el("div", { class: "grid stat-grid" }, [
           statCard("后端", st.backend === "nft" ? "nftables" : st.backend === "iptables" ? "iptables-legacy" : "不可用",
@@ -2616,7 +2671,8 @@ function renderSecurityView(root) {
           statCard("模式", st.whitelist ? "白名单" : "黑名单",
             st.whitelist ? "默认拒绝，仅放行已添加规则" : "默认放行，只拦已添加规则"),
           statCard("SSH 端口", (data.ssh_ports || []).join(", "), "始终优先放行"),
-          statCard("封禁数", String((st.bans || []).length), "nft set 自动到期"),
+          statCard("封禁数", String((st.bans || []).length),
+            permCount ? "其中永久 " + permCount + " 条" : "到期自动解除"),
         ]),
         el("div", { class: "hint mono", text: "持久化文件：" + (data.persist_path || "-") }),
       );
@@ -2642,7 +2698,7 @@ function renderSecurityView(root) {
       const bans = st.bans || [];
       const banRows = bans.map((b) => el("tr", {}, [
         el("td", { class: "mono", text: b.ip }),
-        el("td", { class: "mono", text: b.expires_at ? fmtTime(b.expires_at) : "手动" }),
+        el("td", { class: "mono", text: b.permanent ? "永久" : (b.expires_at ? fmtTime(b.expires_at) : "手动") }),
         el("td", {}, [el("button", { class: "link", text: "解封", onclick: async () => {
           try { await api("DELETE", "/api/v1/firewall/bans/" + encodeURIComponent(b.ip), {}); load(); }
           catch (e) { alert(e.message); }
@@ -2680,10 +2736,13 @@ function renderSecurityView(root) {
   };
 
   let banMinutesDefault = 60;
+  let permaThreshold = 10;
 
-  const banIP = async (ip) => {
+  const banIP = async (ip, permanent) => {
     try {
-      await api("POST", "/api/v1/firewall/bans", { ip: ip, minutes: banMinutesDefault });
+      await api("POST", "/api/v1/firewall/bans", permanent
+        ? { ip: ip, permanent: true }
+        : { ip: ip, minutes: banMinutesDefault });
       await load();
       loadRecords();
     } catch (e) {
@@ -2698,6 +2757,7 @@ function renderSecurityView(root) {
     try {
       const d = await api("GET", "/api/v1/security/records?minutes=" + winSel.value, null, { timeout: 20000 });
       banMinutesDefault = d.ban_minutes || 60;
+      permaThreshold = d.perma_threshold || 0;
 
       const bits = [];
       bits.push(d.ssh && d.ssh.supported ? "SSH 失败 " + d.ssh.count + " 次" : "SSH 日志不可用");
@@ -2713,26 +2773,47 @@ function renderSecurityView(root) {
       const records = d.records || [];
       const rows = records.map((r) => {
         const src = SEC_SOURCE[r.source] || [r.source, "muted"];
+        // 归属地列：国家名可能很长（「特立尼达和多巴哥」），
+        // 列宽固定、超出省略号，鼠标悬停看完整值。
+        const geo = r.country || "—";
+        const geoCell = el("td", {}, [
+          el("span", { class: "sec-geo", text: geo, title: r.country_code ? geo + " (" + r.country_code + ")" : geo }),
+        ]);
+        // 过硬的 IP 直接给「永久封禁」：临时封一小时对这类来源没有意义，
+        // 放出来它还会接着打。
+        const overLimit = permaThreshold > 0 && r.count >= permaThreshold;
+        let action;
+        if (r.banned) {
+          action = badge(r.permanent ? "已永久封禁" : "已封禁", "plain");
+        } else {
+          action = el("button", {
+            class: "link" + (overLimit ? " danger" : ""),
+            text: overLimit ? "永久封禁" : "封禁 " + banMinutesDefault + " 分钟",
+            title: overLimit ? "失败 " + r.count + " 次，超过 " + permaThreshold + " 次阈值" : "",
+            onclick: () => banIP(r.ip, overLimit),
+          });
+        }
         return el("tr", {}, [
           el("td", {}, [badge(src[0], src[1])]),
           el("td", { class: "mono sec-ip", text: r.ip }),
+          geoCell,
           el("td", {}, [badge(String(r.count), r.count >= 20 ? "err" : "warn")]),
           el("td", { class: "mono muted", text: r.last || "-" }),
           el("td", {}, [el("span", { class: "sec-detail", text: r.detail || "", title: r.detail || "" })]),
-          el("td", {}, [r.banned
-            ? badge("已封禁", "plain")
-            : el("button", { class: "link", text: "封禁 " + banMinutesDefault + " 分钟", onclick: () => banIP(r.ip) })]),
+          el("td", {}, [action]),
         ]);
       });
 
       recBox.replaceChildren.apply(recBox, [
         rows.length ? el("table", { class: "data sec-table" }, [
-          el("thead", {}, [el("tr", {}, ["来源", "IP", "次数", "最近一次", "详情", "操作"].map((h) => el("th", { text: h })))]),
+          el("thead", {}, [el("tr", {}, ["来源", "IP", "归属地", "次数", "最近一次", "详情", "操作"].map((h) => el("th", { text: h })))]),
           el("tbody", {}, rows),
         ]) : emptyHint("这段时间内没有扫描或爆破记录"),
         reasons.length ? el("div", { class: "hint", style: "margin-top:10px", text: "部分数据源不可用：" + reasons.join("；") }) : null,
         el("div", { class: "hint", style: "margin-top:10px", text:
-          "SSH 超过 " + (d.threshold || 5) + " 次失败会自动封禁 " + (d.ban_minutes || 60) + " 分钟；扫描探测只做记录，不会自动封（误封正常爬虫的代价更高）。" }),
+          "SSH 超过 " + (d.threshold || 5) + " 次失败会自动封禁 " + (d.ban_minutes || 60) + " 分钟"
+          + (permaThreshold > 0 ? "，超过 " + permaThreshold + " 次直接永久封禁" : "")
+          + "；扫描探测只做记录，不会自动封（误封正常爬虫的代价更高）。" }),
       ].filter(Boolean));
     } catch (e) {
       recMsg.className = "msg err";
@@ -2785,15 +2866,23 @@ function renderSecurityView(root) {
   const manualBan = (() => {
     const ip = el("input", { placeholder: "IP 地址", style: "max-width:200px" });
     const minutes = el("input", { placeholder: "分钟", value: "60", style: "max-width:100px" });
+    const perm = el("input", { type: "checkbox" });
     const btn = el("button", { text: "封禁", onclick: async () => {
       try {
-        await api("POST", "/api/v1/firewall/bans", { ip: ip.value.trim(), minutes: parseInt(minutes.value, 10) || 60 });
+        const body = perm.checked
+          ? { ip: ip.value.trim(), permanent: true }
+          : { ip: ip.value.trim(), minutes: parseInt(minutes.value, 10) || 60 };
+        await api("POST", "/api/v1/firewall/bans", body);
         ip.value = "";
         load();
         loadRecords();
       } catch (e) { alert(e.message); }
     } });
-    return el("div", { class: "row wrap" }, [ip, minutes, btn]);
+    return el("div", { class: "row wrap" }, [
+      ip, minutes,
+      el("label", { class: "row check-inline" }, [perm, el("span", { text: "永久" })]),
+      btn,
+    ]);
   })();
 
   root.replaceChildren(
@@ -3475,7 +3564,7 @@ function renderBackupView(root) {
         el("td", { class: "mono", text: fmtTime(f.mod_time) }),
         el("td", {}, [el("div", { class: "row wrap" }, [
           el("button", { class: "link", text: "下载", onclick: () => {
-            window.location.href = "/api/v1/backups/" + encodeURIComponent(f.name) + "/download";
+            window.location.href = pvURL("/api/v1/backups/" + encodeURIComponent(f.name) + "/download");
           } }),
           el("button", { class: "link", text: "恢复", onclick: async () => {
             if (!confirm("恢复会用备份中的数据库覆盖当前数据，并重启面板。\n当前状态会先自动备份一份。\n\n确定恢复 " + f.name + "？")) return;
@@ -3530,7 +3619,12 @@ function renderSettingsView(root) {
   const webhook = el("input", { placeholder: "https://example.com/webhook" });
   const guard = el("input", { type: "checkbox" });
   const threshold = el("input", { placeholder: "5", style: "max-width:100px" });
+  const permaThresh = el("input", { placeholder: "10", style: "max-width:100px" });
+  const geoChk = el("input", { type: "checkbox" });
   const terminalChk = el("input", { type: "checkbox" });
+  // 访问后缀
+  const apInput = el("input", { placeholder: "留空表示关闭", class: "mono" });
+  const apMsg = el("div", { class: "msg" });
   const info = el("tbody");
   const updateBox = el("div");
   let updateCard = null;
@@ -3594,7 +3688,7 @@ function renderSettingsView(root) {
       if (!r.restarting) return;
       const h = location.hostname;
       if (r.public && location.protocol === "http:" && h !== "127.0.0.1" && h !== "localhost" && h !== "::1") {
-        setTimeout(() => { location.href = location.protocol + "//" + h + ":" + r.port + "/"; }, 4500);
+        setTimeout(() => { location.href = location.protocol + "//" + h + ":" + r.port + PV_BASE + "/"; }, 4500);
       } else if (!r.public) {
         accessMsg.textContent = "已保存，服务重启后请通过 SSH 隧道访问 127.0.0.1:" + r.port;
       }
@@ -3653,6 +3747,9 @@ function renderSettingsView(root) {
       webhook.value = d.alert_webhook || "";
       guard.checked = !!(d.ssh_guard && d.ssh_guard.enabled);
       threshold.value = d.ssh_guard ? d.ssh_guard.threshold : 5;
+      permaThresh.value = d.ssh_guard ? (d.ssh_guard.perma_threshold || 0) : 10;
+      geoChk.checked = d.geoip !== false;
+      apInput.value = d.access_path || "";
       paintAccess(d.access || {});
       paintAccount(d.account || {});
       const p = d.panel || {};
@@ -3800,6 +3897,8 @@ function renderSettingsView(root) {
         alert_webhook: webhook.value.trim(),
         ssh_guard_enabled: guard.checked,
         ssh_guard_threshold: parseInt(threshold.value, 10) || 5,
+        ssh_guard_perma_threshold: parseInt(permaThresh.value, 10) || 0,
+        geoip: geoChk.checked,
         terminal_enabled: terminalChk.checked,
       });
       msg.className = "msg ok";
@@ -3810,6 +3909,40 @@ function renderSettingsView(root) {
       msg.textContent = e.message;
     }
   } });
+
+  // 访问后缀：把登录入口从 / 挪到 /<后缀>/，扫描器敲 / 只会拿到 404。
+  const saveAccessPath = async () => {
+    const v = apInput.value.trim().replace(/^\/+|\/+$/g, "");
+    if (v && !/^[A-Za-z0-9._~-]{2,64}$/.test(v)) {
+      apMsg.className = "msg err";
+      apMsg.textContent = "只能用字母、数字与 . _ ~ -，长度 2–64";
+      return;
+    }
+    if (v && v.length < 6) {
+      if (!confirm("后缀 " + v + " 太短，容易被猜出来。仍要使用吗？")) return;
+    }
+    if (!confirm(v
+      ? "启用后只有 /" + v + "/ 能打开面板，其余路径一律 404。\n保存后当前页面会自动跳转，请记好这个地址。"
+      : "关闭后任何路径都能打开登录页，扫描器会重新发现它。继续？")) return;
+    apMsg.className = "msg";
+    apMsg.textContent = "保存中…";
+    try {
+      await api("PUT", "/api/v1/settings", { access_path: v });
+      const next = (v ? "/" + v : "") + "/";
+      apMsg.className = "msg ok";
+      apMsg.textContent = "已生效，正在跳转到 " + next;
+      setTimeout(() => { location.href = next; }, 600);
+    } catch (e) {
+      apMsg.className = "msg err";
+      apMsg.textContent = e.message;
+    }
+  };
+
+  const randomAccessPath = () => {
+    const b = new Uint8Array(8);
+    crypto.getRandomValues(b);
+    apInput.value = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  };
 
   const restart = el("button", { class: "ghost danger", text: "重启面板", onclick: async () => {
     if (!confirm("重启 panelvps 服务？网站与代理不会中断，面板会断开约 3 秒。")) return;
@@ -3838,11 +3971,24 @@ function renderSettingsView(root) {
       accessMsg,
     ]),
     card("账号", [accountBox]),
+    card("访问后缀（隐藏登录入口）", [
+      el("p", { class: "sub", text: "启用后面板只认 /<后缀>/ 这个入口，直接访问 / 或常见的扫描路径（/.env、/wp-login.php）都会返回 404，扫描器看不出这里有个面板。" }),
+      el("div", { class: "row wrap" }, [
+        apInput,
+        el("button", { class: "ghost", text: "随机生成", onclick: randomAccessPath }),
+        el("button", { text: "保存并跳转", onclick: saveAccessPath }),
+      ]),
+      el("div", { class: "hint", text: "这是收窄暴露面，不是认证：密码、登录限流与 HTTPS 仍然是真正的防线。忘了后缀可以用命令行 panelvps 的第 12 项查看或修改。" }),
+      apMsg,
+    ]),
     card("基本设置", [
       field("公网地址", host, "用于生成分享链接；可填 IP、域名，NAT 机器可写 IP:端口"),
       field("告警 Webhook", webhook, "留空则关闭。事件以 JSON POST 推送，5 分钟内相同标题只发一次"),
       el("label", { class: "row" }, [guard, el("span", { text: "启用 SSH 爆破自动封禁" })]),
       field("失败次数阈值", threshold, "窗口 10 分钟（配置项 ssh_guard_window）"),
+      field("永久封禁阈值", permaThresh, "窗口内失败达到这个次数直接长期封禁，0 表示关闭。默认 10"),
+      el("label", { class: "row", style: "margin-top:8px" }, [geoChk, el("span", { text: "解析攻击来源的 IP 归属地" })]),
+      el("div", { class: "hint", text: "归属地需要出网查询（只发送攻击者 IP），失败时该列显示「—」，不影响其他功能。" }),
       el("label", { class: "row", style: "margin-top:8px" }, [terminalChk, el("span", { text: "启用 Web 终端" })]),
       el("div", { class: "hint", text: "打开后立即生效，不需要重启；写入配置文件 terminal_enabled。终端以 root 身份执行命令，请确保面板本身足够安全。" }),
       el("div", { class: "actions" }, [save, restart]),

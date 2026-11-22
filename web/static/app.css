@@ -902,14 +902,21 @@ table.du-table td.du-name { max-width: 320px; overflow: hidden; text-overflow: e
 /* ---------- 安全记录 ---------- */
 
 .sec-ip { font-variant-numeric: tabular-nums; }
+/* 归属地：国家名长度差很大（「美国」两字 vs 「特立尼达和多巴哥」八字），
+ * 不设宽度会把整行拉宽，设成固定宽度再走省略号，鼠标悬停看全称。 */
+.sec-geo {
+  display: inline-block; max-width: 96px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  vertical-align: bottom;
+}
 .sec-detail {
   max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--text-2); font-size: 13px;
 }
-/* 窄屏（含侧边栏约 780px 主区）放不下六列：先舍「最近一次」，
+/* 窄屏（含侧边栏约 780px 主区）放不下七列：先舍「最近一次」，
  * 比让整张表横向滚动更好读——时间是次要信息。 */
 @media (max-width: 1180px) {
-  table.sec-table th:nth-child(4), table.sec-table td:nth-child(4) { display: none; }
+  table.sec-table th:nth-child(5), table.sec-table td:nth-child(5) { display: none; }
   .sec-detail { max-width: 200px; }
 }
 
