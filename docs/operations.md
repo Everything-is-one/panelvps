@@ -55,6 +55,43 @@ ps -eo rss= | awk '{s+=$1} END {printf "所有进程 RSS 合计 %.0f MB\n", s/10
 sudo slabtop -o -s c | head -12
 ```
 
+### 面板自己占多少，要不要降
+
+960MB 的机器上面板常驻 RSS 在 50–60MB 之间（含 Go runtime 的 `mheap` 元数据、栈、
+GC 结构，约 10–15MB 是改不掉的地板）。想降的话，先看清楚这三件事**都不是**原因：
+
+| 常被怀疑的项 | 实际情况 |
+|---|---|
+| 概览每 3 秒轮询 | 每次只读 `/proc/stat`、`/proc/meminfo`、`/proc/loadavg` 与一次 `statfs`，合计几十 KB 瞬时分配，GC 后即回收。把间隔从 3 秒调到 10 秒，稳态 RSS 基本不动 |
+| 磁盘目录扫描 | **不是常驻任务**：只有鼠标停在「磁盘」卡片上才异步遍历一次，扫完即释放，3 分钟内复用结果 |
+| 进程排行采样 | 2 秒 TTL + 全局互斥，同一时刻只有一个采集者；不悬停根本不跑 |
+
+真正的上限是服务单元里的两个环境变量：
+
+```ini
+Environment=GOMEMLIMIT=64MiB   # 堆的目标上限，不是硬上限
+Environment=GOGC=50            # 每增长 50% 触发一次 GC
+```
+
+`GOMEMLIMIT` 给的是「堆可以长到多大」的预算，RSS 贴近 64MB 说明它在按设计工作。
+想再省一点，把它调到 `48MiB`：
+
+```bash
+sudo systemctl edit panelvps
+# 写入：
+# [Service]
+# Environment=GOMEMLIMIT=48MiB
+sudo systemctl restart panelvps
+```
+
+预期收益 5–10MB RSS，代价是 GC 更频繁（1 核机器上 CPU 会略升）。**960MB 的机器上省这
+10MB 换不来什么**，除非你同时在跑数据库或编译任务。真要压内存，收益大得多的是：
+
+- `journalctl --vacuum-size=50M` ＋ `/etc/systemd/journald.conf` 里 `SystemMaxUse=50M`
+  （日志常驻 15MB 起，还会涨）；
+- 别让面板去扫全盘目录（那是悬停才发生的一次性开销，不是泄漏）；
+- 页缓存高不是问题 —— 它在内存紧张时会被内核直接丢弃，`free` 的 `buff/cache` 列不参与压力判断。
+
 ## 安全契约
 
 | 能力 | 说明 |
@@ -68,7 +105,7 @@ sudo slabtop -o -s c | head -12
 | 响应头 | CSP、HSTS、nosniff、DENY frame、no-referrer |
 | 审计 | 只追加表，`UPDATE`/`DELETE` 由 SQLite 触发器拦截 |
 | 监控 | 直接读 `/proc`，不依赖 cgo 与第三方库 |
-| 部署 | systemd 单元带 `ProtectSystem=full`（/usr、/boot、/etc 只读）与能力收敛 |
+| 部署 | systemd 单元默认放开写权限、只读点名 `/boot` `/efi`，外加能力收敛与 `MemoryMax` |
 
 > 前端全程零构建原生 JS（约 2000 行），目的是让 `go build` 不依赖 Node。
 > 需要更强的交互时再上 Vue，二进制接口不变（ADR-05）。
@@ -298,43 +335,53 @@ sudo /opt/panelvps/bin/panelvps reset-password -db /opt/panelvps/data/panel.db -
 
 ## systemd 沙箱与可写目录
 
-从 v0.3.5 起，单元用 `ProtectSystem=full` 并明确放开 `/usr`、`/etc`、`/var`，`/boot` 与
-`/efi` 仍然只读。之前是「full + 零散白名单」，踩过两次坑：
+**当前写法（v0.4.6 起）：默认放开，只读点名。**
 
-- 白名单只放行了 `/etc/nginx/conf.d` 等几个子目录，`apt-get` 装包时写 `/etc/nginx`、
-  `/var/lib/dpkg` 全线失败；
-- 白名单里的路径**不存在时 systemd 会静默跳过**（`-` 前缀），目录没建就没有 bind mount，
-  面板再往里 `mkdir` 就报 `read-only file system` —— 软件商店装 Xray 时
-  `mkdir /usr/local/share/xray` 失败正是这个原因。
+```ini
+ProtectSystem=no
+ReadOnlyPaths=-/boot -/efi
+```
 
-老版本（≤ v0.3.4）原地修复：
+原来不是这样，而是「`ProtectSystem=full` + `ReadWritePaths` 白名单」。这条路线被坑了三轮，
+每轮都只是把洞补上、没解决产生洞的机制：
+
+| 版本 | 写法 | 撞上的事 |
+|---|---|---|
+| ≤ v0.3.4 | `strict` + 五条白名单 | 文件管理器 `mkdir /home/aaa` 报 read-only |
+| v0.3.5 | `full` + `/etc/nginx/conf.d` 等零散白名单 | `apt-get` 写 `/etc/nginx`、`/var/lib/dpkg` 全线失败 |
+| v0.4.0 | `full` + `-/etc -/usr -/var` + 点名商店目录 | 旧单元升级后仍报 read-only；装 Nginx 时 dpkg 在 `/etc/default/nginx` 失败 |
+
+三个结构性原因让白名单路线注定反复：
+
+1. **枚举总是漏。** 面板的本职就是替用户改系统——装包写 `/usr` `/etc` `/var`、建站写
+   `/etc/nginx`、防火墙写 `/etc/nftables.conf`、调内核写 `/etc/sysctl.d`。清单以外的新功能
+   一定会写到新目录。
+2. **同一份单元在不同机器上行为不同。** systemd 对 `ReadWritePaths` 里带 `-` 前缀且
+   **不存在**的路径是静默跳过的：目录没建，bind mount 不发生，那里就仍是只读。装 Xray 时
+   `mkdir /usr/local/share/xray` 失败，正是这个机制。
+3. **升级只换二进制、不换单元。** 「设置 → 版本更新」不动
+   `/etc/systemd/system/panelvps.service`，于是二进制已经修好、沙箱仍是旧的，症状和没修一样。
+
+翻转成黑名单后，故障面从「N 个可能遗漏的白名单」缩成「2 个明确的只读路径」，而且错误
+直白：真的写到 `/boot` 才报 read-only。写保护对 root 面板的边际收益本来就低（它能写
+systemd 单元、带 `CAP_DAC_OVERRIDE`）；真正挡提权与横向移动的是同一单元里的能力集、
+`RestrictAddressFamilies`、`ProtectKernelTunables` / `ProtectKernelModules`、`MemoryMax`——
+那些一律保留。
+
+**单元不匹配时的修法**：「设置 → 服务单元」会比对磁盘上的单元与二进制内置版本，不一致
+显示「需要更新」，点「用内置版本覆盖」（旧文件备份为 `.bak-时间戳`）再点「重启面板」。
+也可以走命令行：
 
 ```bash
-# 补目录后重启，让 bind mount 重新解析；不升级也能装上 Xray
-sudo mkdir -p /usr/local/share/xray && sudo systemctl restart panelvps
+sudo install -m644 panelvps.service /etc/systemd/system/panelvps.service
+sudo systemctl daemon-reload && sudo systemctl restart panelvps
 ```
 
-现在的单元在 `-/etc -/usr -/var` 之外**再点名**了软件商店实际落地的目录：
+`sudo ./install.sh --check` 会复核单元写法，旧写法（`strict` / `full`）会明确告警。
 
-```
-ReadWritePaths=-/usr/local/bin -/usr/local/share -/usr/local/etc -/etc/systemd/system -/etc/xray
-```
-
-两个原因让「放开 `/usr`」不等于「`/usr/local/bin` 可写」：单元是旧版本时根本没有这条；
-以及 `ReadWritePaths` 的 bind 挂载不覆盖更内层的独立挂载点。装 Xray 报
-`open /usr/local/bin/.pv-write-probe-...: read-only file system` 时按这个顺序处理：
-
-1. 「设置 → 服务单元」看是否显示「需要更新」——升级只换二进制不换单元，这是最常见的原因；
-   点「用内置版本覆盖」后重启面板；
-2. 再确认目录存在：`mkdir -p /usr/local/bin /usr/local/share`（systemd 对不存在的路径静默跳过）。
-
-升级到 v0.3.5+ 会重写单元、预创建常用目录，以上通常不必手动做。
-`sudo ./install.sh --check` 可复核当前单元与目录状态。
-
-从 v0.3.6 起，「设置 → 服务单元」会比对磁盘上的单元与当前二进制内置的版本：不一致时显示
-「需要更新」，点「用内置版本覆盖」即可写入并 `daemon-reload`（旧文件备份为 `.bak-时间戳`），
-再点「重启面板」生效。这条路径解决的是**「设置 → 版本更新」只换二进制、不换 systemd 单元**
-的问题。
+装包前面板会先探 `/etc` `/usr` `/var` 三个根目录（`internal/softstore/preflight.go`），
+写不进去就在下载安装包之前停下并说明原因，不会走到 dpkg 半装那一步。如果已经半装，
+先 `apt-get -f install` 收尾。
 
 注意：面板自带的 Web 终端不能用来修这类问题 —— 它是面板的子进程，继承同一份只读 mount
 namespace；`sudo` 也会失败（`setresuid(...): Operation not permitted`），因为单元里开了
