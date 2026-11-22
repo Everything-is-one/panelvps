@@ -502,18 +502,30 @@ func runCmd(ctx context.Context, log func(string), name string, args ...string) 
 	return err
 }
 
+// aptArgs 拼出 apt-get 的参数。
+//
+// 抽成纯函数是为了能被测试直接断言。之前这里是就地拼的，测试只校验了
+// dry-run 的展示文案（"apt install nginx"），而实际执行的参数里漏掉了
+// install 子命令 —— 于是 apt-get 把第一个包名当成命令，报
+//
+//	E: Invalid operation nginx
+//
+// 并以 100 退出。展示文案是对的，执行是错的，正好绕过了测试。
+func aptArgs(a AptAction) []string {
+	if a.Purge {
+		// purge 本身就是子命令，-y 是选项，放在前面即可
+		return append([]string{"-y", "purge"}, a.Names...)
+	}
+	return append([]string{"install", "-y", "--no-install-recommends"}, a.Names...)
+}
+
 func runApt(ctx context.Context, a AptAction, log func(string)) error {
 	if a.Update {
 		if err := runCmd(ctx, log, "apt-get", "update", "-q"); err != nil {
 			return fmt.Errorf("apt-get update 失败: %w", err)
 		}
 	}
-	args := []string{"-y", "--no-install-recommends"}
-	if a.Purge {
-		args = []string{"-y", "purge"}
-	}
-	args = append(args, a.Names...)
-	return runCmd(ctx, log, "apt-get", args...)
+	return runCmd(ctx, log, "apt-get", aptArgs(a)...)
 }
 
 func runDownload(ctx context.Context, a DownloadAction, log func(string)) error {
@@ -788,6 +800,14 @@ func runService(a ServiceAction, log func(string)) error {
 		if !s.on {
 			continue
 		}
+		// stop / disable 对「单元根本不存在」是幂等成功：它本来就没在跑。
+		// 安装失败回滚时最容易撞上 —— apt 没装上，回滚去 stop nginx，
+		// systemctl 再报一次 "Unit not loaded"，真正的失败原因就被这两行
+		// 噪音盖住了，用户看到的是「回滚未完全成功」而不是「apt 装不上」。
+		if (s.verb == "stop" || s.verb == "disable") && !unitExists(a.Name) {
+			log("  服务 " + a.Name + " 尚未安装，跳过 " + s.verb)
+			continue
+		}
 		if err := runCmd(context.Background(), log, "systemctl", s.verb, a.Name); err != nil {
 			if a.IgnoreError {
 				log("  跳过 systemctl " + s.verb + " " + a.Name)
@@ -801,6 +821,19 @@ func runService(a ServiceAction, log func(string)) error {
 		}
 	}
 	return nil
+}
+
+// unitExists 判断 systemd 单元是否存在。
+//
+// 用 list-unit-files 而不是 is-active：后者对不存在的单元也返回非零，
+// 和「存在但没跑」分不开。
+func unitExists(name string) bool {
+	out, err := exec.Command("systemctl", "list-unit-files", "--no-legend", "--no-pager", "--", name+".service").Output()
+	if err != nil {
+		// systemctl 不可用（非 Linux）时不做判断，按原流程走
+		return true
+	}
+	return strings.TrimSpace(string(out)) != ""
 }
 
 func runCheck(ctx context.Context, a CheckAction, log func(string)) error {

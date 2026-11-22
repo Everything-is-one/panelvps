@@ -76,6 +76,72 @@ func TestAptRejectsShellMetachars(t *testing.T) {
 	}
 }
 
+// apt-get 的语法是 apt-get [选项] 命令 [包...]，第一个非选项参数必须是
+// 命令。漏掉 install 时 apt-get 会把包名当命令，报
+// "E: Invalid operation nginx" 并以 100 退出 —— 全部 apt 类清单都装不上。
+//
+// 这里按 apt-get 的解析规则校验，而不是简单比较字符串：以后再加参数
+// （-o 之类）也不会误判。
+func TestAptArgsHasSubcommand(t *testing.T) {
+	known := map[string]bool{
+		"install": true, "purge": true, "remove": true, "update": true,
+		"upgrade": true, "autoremove": true, "clean": true,
+	}
+
+	cases := []struct {
+		name string
+		a    AptAction
+		want string // 期望的子命令
+	}{
+		{"安装", AptAction{Names: []string{"nginx"}}, "install"},
+		{"安装多个", AptAction{Names: []string{"nginx", "curl"}}, "install"},
+		{"卸载", AptAction{Names: []string{"nginx"}, Purge: true}, "purge"},
+	}
+
+	for _, c := range cases {
+		args := aptArgs(c.a)
+		var cmd string
+		for _, s := range args {
+			if strings.HasPrefix(s, "-") {
+				continue
+			}
+			cmd = s
+			break
+		}
+		if cmd == "" {
+			t.Fatalf("%s: 参数里没有任何子命令: %v", c.name, args)
+		}
+		if !known[cmd] {
+			t.Errorf("%s: 首个非选项参数 %q 不是 apt-get 子命令，apt-get 会把它当成包名并报 Invalid operation。参数: %v",
+				c.name, cmd, args)
+		}
+		if cmd != c.want {
+			t.Errorf("%s: 子命令 = %q，期望 %q（参数 %v）", c.name, cmd, c.want, args)
+		}
+		// 包名必须都在，且不能被子命令吞掉
+		for _, p := range c.a.Names {
+			found := false
+			for _, s := range args {
+				if s == p {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("%s: 包名 %q 不在参数里: %v", c.name, p, args)
+			}
+		}
+	}
+}
+
+// 回归：曾经 aptArgs 漏了 install，导致首个非选项参数就是包名。
+func TestAptArgsRegressionInstallFirst(t *testing.T) {
+	args := aptArgs(AptAction{Names: []string{"nginx"}})
+	if len(args) == 0 || args[0] != "install" {
+		t.Fatalf("aptArgs 的第一个参数应为 install，实际为 %v", args)
+	}
+}
+
 func TestPlanLines(t *testing.T) {
 	s, _ := Load()
 	m, err := s.Get("nginx")
