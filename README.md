@@ -1,581 +1,114 @@
 # PanelVPS
 
-> 用 Go 写的单二进制 VPS 管理面板，带 Xray 代理管理，512MB 可用内存就能跑。
+> 把 VPS 日常运维和 Xray 代理管理装进一个网页 —— 只有一个 13MB 的二进制，
+> 空载内存 <50MB，一条命令 10 秒装好。
 
 [![CI](https://github.com/Everything-is-one/panelvps/actions/workflows/ci.yml/badge.svg)](https://github.com/Everything-is-one/panelvps/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.27%2B-00ADD8.svg)](https://go.dev/)
-[![Platform](https://img.shields.io/badge/linux-amd64%20%7C%20arm64-lightgrey.svg)](#一键安装)
+[![Platform](https://img.shields.io/badge/linux-amd64%20%7C%20arm64-lightgrey.svg)](#安装)
 
-## 这是什么
+<p align="center">
+  <img src="docs/screenshots/overview.png" alt="概览：资源占用、磁盘下钻、面板与系统信息" width="880">
+</p>
 
-PanelVPS 把 VPS 上常做的几件事放进一个网页：看资源、改文件、开终端、查日志、配防火墙、建站，
-另外带一套 Xray 代理管理（VLESS / VMess / Trojan / Shadowsocks，多用户、流量统计、配额与到期），
-不用再单独装 x-ui。
+## 为什么是它
 
-只有一个二进制，前端资源在编译时打包进去，数据存 SQLite，运行时不依赖 Docker、Python 或 Node。
-空载内存 50MB 左右，512MB 可用内存的机器上还能留出空间跑站点和代理。
+- **一个文件，没有依赖**：`go build` 出来的静态二进制，前端资源编译时打包进去，数据存
+  SQLite。不用装 Docker、Python、Node，也没有一堆容器要维护。
+- **小内存机器也跑得动**：空载 <50MB，512MB 的机器上还能留出空间跑站点和代理。
+- **装得快**：脚本自动识别架构、校验 SHA256、配好 systemd，10 秒内打印初始密码。默认只
+  监听 `127.0.0.1`，不裸奔。
+- **不用再装 x-ui**：VLESS / VMess / Trojan / Shadowsocks 多用户、流量统计、配额与到期、
+  分享链接与二维码，全在一个页面里。
 
-## 当前状态
+## 能做什么
 
-| 阶段 | 内容 | 状态 |
-|---|---|---|
-| M0 | 骨架：CLI、SQLite、认证、会话、安全默认值、embed 前端、healthz | ✅ 已完成 |
-| M1 | 代理：Xray 编排、入站/客户端、流量统计、分享链接 | ✅ 已完成 |
-| M2 | 运维：监控、文件、终端、防火墙、日志 | ✅ 已完成 |
-| M3 | 网站与商店：站点/证书/PHP、声明式软件商店 | ✅ 已完成 |
-| M4 | 打磨：备份、告警、自更新、签名发布 | ✅ 已完成（签名发布未做） |
-| M5 | 控制：公网访问与端口、重置密码、BBR、重启 | ✅ 已完成 |
-
-## 资源与范围
-
-- 面板空载 RSS ≤ 50MB，二进制 13MB（发布上限 25MB）
-- 面板 + Xray + Nginx + PHP 按 320MB 以内设计，512MB 可用内存下仍有余量
-- 不做容器管理、不做大而全的应用市场、不做多节点
-
-## 功能一览
-
-| 页面 | 能做什么 |
+| 页面 | 能力 |
 |---|---|
-| 概览 | CPU / 内存 / 磁盘 / 面板占用；内存按 cgroup 口径把可回收的文件页缓存（`memory.stat` 的 file 减去 tmpfs，不看 active / inactive 链表）从「已用」里扣掉，缓存量写在副标题（`已用 + 缓存 = 容器总量`）；鼠标停在 CPU / 内存卡上显示占用前 5 名的进程；磁盘卡直接显示「哪个目录吃掉了空间」，点开还能逐层下钻到具体文件（异步扫描 + 3 分钟缓存，不阻塞页面）；面板信息与系统环境并排且等高；请求带超时与切页取消，失败显示原因并可一键重试，回到标签页立即补刷 |
-| 代理 | 入站管理、分享链接与二维码、流量采样、配额与到期 |
-| 用户 | 跨入站的用户总表：已用流量、配额、到期与剩余天数、启停与编辑、重置流量 |
-| 中转 | 端口转发规则（TCP / UDP / 双栈），实时上下行与活跃连接数 |
-| 网站 | 建站（静态 / PHP）、生成并下发 Nginx 配置、申请证书、预览配置 |
-| 文件 | 浏览、编辑、上传下载、打包解压、重命名/复制；按文件名搜索当前目录及子目录（默认 6 层 / 200 条，超出会提示）；勾选框支持全选与 Shift 连选，可批量打包下载（服务端不落盘）或移入回收站；删除先进回收站（7 天可恢复），系统目录与挂载点由服务端直接拒绝 |
-| 终端 | xterm.js 渲染的 PTY，光标/颜色/全角字符与 SSH 一致；支持双标签切换，每个标签是独立会话（切走不中断）；会话 30 分钟、并发 2；开关在设置里，改完立即生效 |
-| 安全 | nftables / iptables 双后端、规则编辑、一键下发、临时封禁；外网攻击记录汇总三个入口（SSH 爆破 / 面板撞库 / 网站扫描探测），按 IP 聚合、可选时间窗口、一键封禁 |
-| 日志 | 面板 / Xray / SSH / Nginx / syslog 六个固定来源，可按行数尾部读取 |
-| 商店 | 12 个软件的声明式清单（列表 / 卡片两种视图），已安装与可安装分层、品牌色 logo、表头冻结，可预览每一步再安装，失败自动回滚 |
-| 备份 | 一键备份（含数据库一致性快照）、下载、恢复（二次确认 + 安全备份）、自动清理 |
-| 设置 | 访问方式与端口、重置密码、Web 终端开关、公网地址、告警 Webhook、SSH 防护、自更新（打开即自动检查，侧边栏圆点提示新版）、服务单元自检 |
+| 概览 | CPU / 内存 / 磁盘实时趋势；内存按 cgroup 口径扣掉可回收页缓存；磁盘卡直接显示哪个目录占空间，点开逐层下钻到文件 |
+| 代理 | Xray 入站与用户、流量采样、配额与到期、分享链接与二维码 |
+| 用户 | 跨入站总表：已用流量、配额、剩余天数，按到期/超额/停用筛查，一键重置 |
+| 中转 | TCP / UDP 端口转发，实时上下行与活跃连接数 |
+| 网站 | 静态 / PHP 建站、Nginx 配置生成与下发、证书申请 |
+| 文件 | 浏览编辑、上传下载、打包解压、回收站、按文件名搜索子目录 |
+| 终端 | xterm.js + PTY，双标签独立会话（切走不断），断线重连 |
+| 安全 | nftables / iptables 双后端、规则下发、临时封禁、SSH 爆破与网站扫描记录 |
+| 日志 | 面板 / Xray / SSH / Nginx / syslog 六个固定来源 |
+| 商店 | 12 个软件的声明式清单，步骤可预览，失败自动回滚 |
+| 备份 | 数据库一致性快照、下载、恢复、自动清理 |
+| 设置 | 访问方式与端口、重置密码、告警 Webhook、SSH 防护、自更新、服务单元自检 |
 
-界面为左侧导航 + 卡片布局，内容区最宽 1280px 居中（超宽屏不会把表格拉成一条线），桌面与手机都能用。
+界面是左侧导航 + 卡片布局，内容区最宽 1280px 居中，桌面与手机都能用。命令行敲
+`panelvps` 还有一个数字菜单，负责启停、改端口、重置密码、开 BBR、重启服务器。
 
-命令行另有一个管理菜单，敲 `panelvps` 就能启停服务、改端口、重置密码、开 BBR、重启服务器。
+## 安装
 
-## 快速开始
-
-### 从源码构建
-
-```bash
-go build -trimpath -ldflags "-s -w" -o bin/panelvps ./cmd/panelvps
-```
-
-交叉编译两个架构：
+Debian 12 / Ubuntu 22.04+，amd64 与 arm64 均支持：
 
 ```bash
-./scripts/build.sh
-```
-
-### 本地运行
-
-```bash
-./bin/panelvps serve
-```
-
-首次启动会自动创建管理员账号，**初始密码只打印在 stdout**（不落盘），形如：
-
-```
-========================================
-  首次启动，已创建管理员账号
-  用户名: admin
-  密  码: XXXXXXXXXXXXXXXX
-========================================
-```
-
-默认只监听 `127.0.0.1:20873`，浏览器直接访问即可。
-
-### 一键安装
-
-Debian 12 / Ubuntu 22.04+，amd64 与 arm64 均支持。自动判断架构、下载对应二进制、校验 SHA256、
-装好 systemd 服务，最后直接把初始密码打印出来。
-
-```bash
-# 最新版
 curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/main/deploy/bootstrap.sh | sudo bash
 ```
 
-生产环境建议锁定版本，让脚本和二进制取同一个 tag，避免 `main` 更新后错配：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/v0.3.8/deploy/bootstrap.sh \
-    | sudo bash -s -- --ref v0.3.8
-```
-
-只体检、不安装（逐项报告能力，不改动系统）：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/main/deploy/bootstrap.sh \
-    | sudo bash -s -- --check
-```
-
-`bootstrap.sh` 的常用参数（透传给 `install.sh`）：
-
-| 参数 | 作用 |
-|---|---|
-| `--ref TAG` | 锁定版本，脚本与二进制取同一个 tag |
-| `--base URL` | 换分发源，见下表 |
-| `--public` | 装完直接监听 `0.0.0.0`，可用 `IP:端口` 访问 |
-| `--check` | 只体检，不安装 |
-
-卸载走 `deploy/` 目录里的安装脚本，数据目录会保留：
-
-```bash
-sudo ./deploy/install.sh --uninstall
-```
-
-`bootstrap.sh` 取文件的来源按优先级：
-
-| 来源 | 用法 | 适用 |
-|---|---|---|
-| GitHub Release | 默认，`--ref` 可锁定 tag | 首选 |
-| `--base URL` | `--base https://dl.example.com/panelvps` | 国内访问 GitHub 慢，自建分发 |
-| 本地文件 | `sudo ./deploy/install.sh` | 已手工上传安装包 |
-
-跑脚本本身走 `raw.githubusercontent.com`，下二进制走 Release。这两条路在国内都可能被干扰，
-所以 `bootstrap.sh` 内置了回退：直链返回非 200 时自动改用 `api.github.com` 取同一份资产，
-两条都不通才会报错。实测 `github.com/releases/download` 会间歇性返回 502，而 API 通道稳定。
-
-仍拉不动时，用发布脚本把安装包推到自己有 HTTPS 的目录，再带 `--base` 安装：
-
-```bash
-# 本机执行：交叉编译 → 生成 SHA256SUMS → 上传
-./scripts/publish.sh root@1.2.3.4:/www/wwwroot/dl.example.com/panelvps \
-    --base https://dl.example.com/panelvps
-
-# 目标机器
-curl -fsSL https://dl.example.com/panelvps/bootstrap.sh | sudo bash
-```
-
-### 安装后访问
-
-面板默认只监听 `127.0.0.1:20873`，不暴露公网。用 SSH 隧道访问：
+脚本会下载对应架构的二进制、校验 SHA256、装好 systemd 服务，最后把初始密码打印出来。
+默认只监听 `127.0.0.1:20873`，用 SSH 隧道访问：
 
 ```bash
 ssh -L 20873:127.0.0.1:20873 root@<服务器IP>
 # 浏览器打开 http://127.0.0.1:20873
 ```
 
-想直接用 `IP:端口` 打开，安装时加 `--public`：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Everything-is-one/panelvps/main/deploy/bootstrap.sh \
-    | sudo bash -s -- --public
-```
-
-装完会打印访问地址，并提醒去云厂商安全组放行该端口。已经装好的也不用重装：
-登录后进「设置 → 访问方式」，勾上「允许通过 IP + 端口访问」并保存，面板会改监听地址、
-同步防火墙规则，然后自己重启，用新地址就能打开。
-
-同一个地方还能改端口（1–65535）。保存顺序是先试绑新端口 → 更新防火墙 → 重启面板，
-任何一步失败都回滚，不会出现「新端口没放行、旧端口已关」把自己锁在门外。
-
-> 面板自己不做 HTTPS，公网直连就是明文 HTTP。要么在前面套一层 TLS 反向代理，
-> 要么至少用 16 位以上随机密码，并且只放行自己的出口 IP。
-
-### 在 LXC / 容器里安装
-
-LXC 小鸡共享宿主内核，容器内的 systemd 通常**没有** `CAP_NET_ADMIN` / `CAP_SYS_ADMIN`，
-主单元里的 `AmbientCapabilities`、`MemoryMax`、`ProtectSystem` 会让服务直接启动失败。
-安装脚本会自动识别容器并装上降级覆盖（`deploy/panelvps-container.conf`），不需要手工改。
-
-先体检，看清楚这台机器能用到哪些功能：
-
-```bash
-sudo ./deploy/install.sh --check
-```
-
-再安装：
-
-```bash
-sudo ./deploy/install.sh
-sudo journalctl -u panelvps | grep 初始管理员     # 取初始密码
-```
-
-`--check` 会逐项报告：
-
-| 输出 | 含义 | 非特权 LXC 的典型结果 |
-|---|---|---|
-| `CAP_NET_ADMIN` | 防火墙能否下发规则、能否封禁 IP | ❌ 只能查看，不能下发 |
-| `CAP_NET_BIND_SERVICE` / `ip_unprivileged_port_start` | 能否监听 80 / 443 | 视商家配置而定，常见 ❌ |
-| 防火墙后端 | 实际走 nftables 还是 iptables-legacy | ❌ none |
-| PTY | Web 终端能否连接 | ✅ 一般可用（需挂载 devpts） |
-| journald | 日志页与初始密码 | ✅ |
-| nginx / certbot / xray | 站点、证书、代理 | 需自行安装 |
-
-**能力不足时的替代路径**
-
-- **绑不了 80/443**：让宿主设置 `net.ipv4.ip_unprivileged_port_start=0`
-  （LXC 配置 `lxc.sysctl.net.ipv4.ip_unprivileged_port_start = 0`），
-  或让 Nginx 听 8080、由宿主 Nginx / 端口映射转发 80 → 8080。
-  站点配置里的 `listen` 目前固定 80/443，走这条路需要先在容器内用
-  `sysctl -w net.ipv4.ip_unprivileged_port_start=0` 验证是否允许。
-- **防火墙不可下发**：安全边界退化为「只监听 127.0.0.1 + SSH 隧道」。
-  在容器里刷 iptables 会和宿主规则打架，商家一般也不允许，不建议强求。
-- **想在 NAT 小鸡上直连面板**：进「设置 → 访问方式」勾上公网访问，或把 `conf/panel.yaml`
-  的 `listen` 改成 `0.0.0.0:20873`，再用商家给的端口映射访问；只做临时测试，测完改回 `127.0.0.1`。
-
-**只想先跑起来看看**（不装 systemd 服务）：
-
-```bash
-mkdir -p /opt/panelvps/{bin,conf,data}
-install -m 0755 panelvps-linux-amd64 /opt/panelvps/bin/panelvps
-/opt/panelvps/bin/panelvps serve -config /opt/panelvps/conf/panel.yaml
-```
-
-首次启动会打印初始密码；`Ctrl-C` 即停，数据留在 `/opt/panelvps/data`。
-
-### 管理菜单
-
-装完不用记子命令，敲 `panelvps` 回车就是个数字菜单：
-
-```
-PanelVPS 0.2.0  管理菜单
-────────────────────────────────────────────────────
- 服务 : 运行中 (pid 2314) · 开机自启
- 监听 : 127.0.0.1:20873（仅本机）
- BBR  : 未开启（cubic）
-────────────────────────────────────────────────────
-  1) 启动面板
-  2) 停止面板
-  3) 重启面板
-  4) 查看运行状态
-  5) 查看最近日志
-  6) 监听地址与端口（IP:端口 外网访问）
-  7) 重置账号密码
-  8) BBR 加速开关
-  9) 显示面板信息
- 10) 重启服务器
-  0) 退出
-```
-
-- **6) 监听地址**：选「公网直连」再填端口，配置落盘后自动重启，并打印可用地址。已下发过防火墙规则的会按新端口重下一遍，失败则回滚配置——不会留下「新端口没放行、旧端口已关」的状态
-- **7) 重置密码**：随机 20 位（只显示一次）或自己输入，改完踢掉该账号所有会话
-- **8) BBR**：先显示当前的拥塞控制与队列算法，开启后写入 `/etc/sysctl.d/99-panelvps.conf`，由 helper 单元立即应用，重启后仍然有效
-- **10) 重启服务器**：要输入 `REBOOT` 确认
-
-没有 systemd 的环境（非特权容器、前台跑二进制）里，服务相关的项会说明不可用，改配置和重置密码照常可用。
-
-### 常用命令
-
-```bash
-panelvps                  # 管理菜单（默认）
-panelvps serve            # 前台启动服务
-panelvps version          # 版本
-panelvps info             # 配置、路径、账号数
-panelvps init             # 创建管理员
-panelvps reset-password   # 重置为随机密码并踢掉所有会话
-```
-
-安装脚本会在 `/usr/local/bin/panelvps` 建一个软链，所以任何目录下敲 `panelvps` 都行；
-systemd 单元用的是 `/opt/panelvps/bin/panelvps serve` 绝对路径，不受影响。
-
-### 验收测试
-
-装完先跑一遍冒烟测试，它会逐项报告哪些能力在这台机器上**真的**可用：
-
-```bash
-pip3 install requests          # 唯一依赖
-PV_PASSWORD='初始密码' python3 scripts/smoke_test.py
-```
-
-只读模式 31 项，不改任何数据。加 `--write` 会额外验证上传 / 编辑 / 打包 / 解包、
-防火墙规则增删、建站与删站；文件放在 `_smoke` 临时目录、站点用 `smoke-*` 命名，结束时全部清理。
-
-```
-共 31 项：通过 27，失败 0，跳过 4
-```
-
-**SKIP 不是错误**：它表示该能力在当前环境不可用，例如非特权容器拿不到 `CAP_NET_ADMIN`、
-Windows 上无法创建 PTY。有 FAIL 时脚本以退出码 1 结束，可用于 CI。
-
-## M0 已实现的契约
-
-| 能力 | 说明 |
-|---|---|
-| 认证 | argon2id（m=19MiB，低内存档）、12 位起步的密码策略、弱密码表 |
-| 会话 | 令牌只存 SHA-256、HttpOnly + SameSite=Lax、改密后踢掉所有旧会话 |
-| 防爆破 | 同 IP 5 次失败封 1 小时，进程内计数 |
-| CSRF | 双提交 Cookie + `X-CSRF-Token` 请求头 |
-| 响应头 | CSP、HSTS、nosniff、DENY frame、no-referrer |
-| 审计 | 只追加表，`UPDATE`/`DELETE` 由 SQLite 触发器拦截 |
-| 监控 | 直接读 `/proc`，不依赖 cgo 与第三方库 |
-| 部署 | systemd 单元带 `ProtectSystem=full`（/usr、/boot、/etc 只读）与能力收敛 |
-
-> 前端全程零构建原生 JS（约 2000 行），目的是让 `go build` 不依赖 Node。
-> 需要更强的交互时再上 Vue，二进制接口不变（ADR-05）。
-
-## M1 已实现的契约
-
-| 能力 | 说明 |
-|---|---|
-| 协议 | VLESS（REALITY / TLS / 无加密）、VMess、Trojan、Shadowsocks（2022 多用户） |
-| 传输 | TCP、WebSocket、gRPC；REALITY 限 tcp/grpc |
-| 配置下发 | 生成 → `xray -test` → 备份 → 原子替换 → 重启 → 等端口就绪；任一步失败自动回滚 |
-| 进程托管 | 子进程 + 指数退避重拉（1s→30s），面板退出时一并收掉，不留孤儿 |
-| 流量统计 | 走 `xray api statsquery`，不引入 gRPC/protobuf 依赖；游标做差，进程重启不清零 |
-| 配额 | 超额/到期自动禁用并重建配置，界面状态与实际一致 |
-| 分享链接 | vless / vmess / trojan / ss 四种；入站卡片上一键复制，也可扫码；二维码服务端生成，前端零依赖 |
-| 密钥 | REALITY X25519 密钥对、UUIDv4、SS-2022 定长 PSK 均由服务端生成，表单里不用填 |
-
-**新建入站的默认行为**：端口在 20000–59999 里随机挑一个（避开面板端口、Xray
-内部接口与已有入站），同时自动建一个名为 `default` 的用户 —— 建完立刻能「复制链接」，
-不用再点一次「+ 用户」。REALITY 的私钥、公钥、shortId 全部自动生成，表单只需要
-伪装目标与 SNI（默认 `www.cloudflare.com`）。`xtls-rprx-vision` 只在 TCP 上生效，
-创建用户时自动带上；gRPC 不带（带了会让客户端握手失败）。
-
-**NAT / 端口映射的机器**（云厂商 NAT 机型、LXC、容器 VPS）要额外填「对外端口」：
-容器内监听 47736、商家把公网 30986 转发进来时，分享链接必须写 30986。
-两处可填，任选其一：
-
-- 设置里的「公网地址」直接写 `IP:端口`，相当于全局默认
-- 入站的「对外端口」，只影响这一个入站，优先级高于全局
-
-都留空则链接用监听端口 —— 独立 IP、直接暴露端口的机器不用管。
-
-连不上时按这个顺序查，一步排除一层：
-
-```bash
-# 1) 服务端有没有人在听（没输出 = Xray 没起来）
-ss -lntp | grep -E '47736|30986'
-
-# 2) Xray 到底怎么了（面板托管的子进程，日志在这里，不在 journald）
-tail -n 40 <data_dir>/xray.log     # 默认 /opt/panelvps/data/xray.log
-
-# 3) 面板自己看到的 Xray 状态
-systemctl is-active panelvps
-```
-
-```powershell
-# 4) 在你自己电脑上测公网端口（不是服务器上）
-Test-NetConnection 204.197.163.238 -Port 30986
-```
-
-第 4 步不通 = 端口映射/商家防火墙没放行，与面板和 Xray 无关；
-通了但客户端仍失败 = REALITY 层，先核对客户端里的**公钥（pbk）与 shortId**
-是否与面板「链接」里的一致（手填极容易漏）。
-
-**M1 实测结论**（2026-11-21，Xray 26.11.9）：
-
-- 五种入站组合生成的配置全部通过真实 `xray -test`
-- 客户端经 VLESS 入站访问 `gstatic/generate_204` 返回 204、访问 `api.github.com` 返回 200
-- 流量准确记到对应用户名下（`alice` 独占总量，另两人为 0）
-- 把配额改成 1000 字节后，下一次采样自动禁用该用户并把其从配置中剔除
-
-## M2 已实现的契约（运维）
-
-| 能力 | 说明 |
-|---|---|
-| 文件沙箱 | 所有路径先 `Clean` + 相对化 + 对最近已存在祖先做 `EvalSymlinks`，越界直接 403；写盘走临时文件 rename |
-| 上传 / 下载 | 流式，单文件上限 512MB；响应只回文件名与相对路径，不回绝对路径 |
-| 归档 | tar.gz / zip 打包与解包；zip slip 拦截、20000 条与 2GB 解压上限（压缩炸弹） |
-| 服务与进程 | 服务名正则白名单、动作白名单（start/stop/restart/reload/enable/disable） |
-| Web 终端 | PTY + WebSocket；一次性票据（2 分钟、单次使用），不把 Cookie 放进 URL；shell 必须是绝对路径 |
-| 防火墙 | `nft` 建表探测失败自动降级 `iptables-legacy`；SSH 与面板端口**永远排在用户 drop 规则之前**；nft set 自带 timeout 实现到期自动解封 |
-| 日志 | 六个固定来源，不接受任意路径；只 seek 文件末尾 512KB，不会把整个日志读进内存 |
-| 异步任务 | 内存态执行器，并发 2、单任务 15 分钟超时、日志上限 256KB，避免 apt/证书撑爆 HTTP 超时 |
-
-## M3 已实现的契约（网站与商店）
-
-| 能力 | 说明 |
-|---|---|
-| 站点 | 站点名 `^[a-z0-9][a-z0-9-]{1,30}$`，根目录必须在 `sites_root` 下；配置写入 → `nginx -t` → reload，失败回滚旧配置 |
-| 证书 | certbot webroot 模式（HTTP-01），异步任务执行；域名与邮箱先校验格式 |
-| 软件商店 | 清单只允许 7 种动作：`apt / download / extract / write_file / path / service / check`，**不含自由脚本** |
-| 安装前检查 | 已装则跳过、冲突与依赖校验、下载必须 https 且拒绝内网/回环地址、剩余内存不足一半直接拦截 |
-| 目录预检 | 动手前先对计划写入的目录做真实写入探测，不可写就在下载安装包之前失败，并给出修复命令 |
-| 回滚 | 任一步失败按逆序撤销已执行的写文件/服务动作；非 Linux 直接 501，不假装能装 |
-
-## M4 已实现的契约（备份与自更新）
-
-| 能力 | 说明 |
-|---|---|
-| 备份 | `VACUUM INTO` 取数据库一致性快照 + 配置 + 版本信息，打包 tar.gz；文件名白名单正则防穿越 |
-| 恢复 | 需 `confirm=RESTORE`；先做安全备份，再校验 SQLite 头，替换后重启面板 |
-| 清理 | 保留最近 N 份（默认 30），按文件名时间戳排序 |
-| 告警 | 单一通用 Webhook（POST JSON），5 分钟内相同标题去重，避免告警风暴 |
-| 自更新 | 只信任 https + GitHub 域名的 release 资源；下载后校验 sha256，替换前校验 ELF 头，保留 `.old-<时间戳>`；打开面板与设置页自动检查，服务端缓存 10 分钟避免打满 GitHub 未认证限流，手动检查强制回源 |
-
-**M2–M4 端到端实测**（2026-11-21，本地实例 + 假 nginx，82 项）：
-
-- 认证：未登录 401、错密码 401、缺 CSRF 403、弱密码 400、改密后旧会话失效
-- 文件：穿越 403、绝对路径按根相对、上传下载字节一致、打包解压往返、删除需 `confirm=DELETE`
-- 防火墙：端口 70000 与 `1-2; rm -rf /`、来源 `1.2.3.4; reboot` 全部 400；无后端时 503
-- 站点：`../evil` 与非法域名 400、重名/重域名 409、预览含 `server_name` 与点文件拒绝、删除后配置同步清理
-- 商店：12 个清单可读，步骤可预览，非 Linux 安装/卸载 501
-- 备份：任务是异步的、产物是合法 tar.gz 且含 `panel.db`、`../` 名称 400、恢复需确认词
-- 更新：非 GitHub 来源 400
-
-## 入口与内核调优
-
-### systemd 沙箱与可写目录（软件商店装不上时先看这里）
-
-从 v0.3.5 起，单元用 `ProtectSystem=full` 并明确放开 `/usr`、`/etc`、`/var`，
-`/boot` 与 `/efi` 仍然只读。之前是「full + 零散白名单」，踩过两次坑：
-
-- 白名单只放行了 `/etc/nginx/conf.d` 等几个子目录，`apt-get` 装包时写
-  `/etc/nginx`、`/var/lib/dpkg` 全线失败；
-- 白名单里的路径**不存在时 systemd 会静默跳过**（`-` 前缀），目录没建就没有
-  bind mount，面板再往里 `mkdir` 就报 `read-only file system` —— 软件商店装
-  Xray 时 `mkdir /usr/local/share/xray` 失败正是这个原因。
-
-老版本（≤ v0.3.4）原地修复：
-
-```bash
-# 补目录后重启，让 bind mount 重新解析；不升级也能装上 Xray
-sudo mkdir -p /usr/local/share/xray && sudo systemctl restart panelvps
-```
-
-升级到 v0.3.5+ 会重写单元、预创建常用目录，以上都不必手动做。
-`sudo ./install.sh --check` 可复核当前单元与目录状态。
-
-从 v0.3.6 起，「设置 → 服务单元」会比对磁盘上的单元与当前二进制内置的版本：
-不一致时显示「需要更新」，点「用内置版本覆盖」即可写入并 `daemon-reload`
-（旧文件备份为 `.bak-时间戳`），再点「重启面板」生效。这条路径解决的是
-**「设置 → 版本更新」只换二进制、不换 systemd 单元**的问题。
-
-注意：面板自带的 Web 终端不能用来修这类问题 —— 它是面板的子进程，继承同一份
-只读 mount namespace；`sudo` 也会失败（`setresuid(...): Operation not permitted`），
-因为单元里开了 `RestrictSUIDSGID`。终端本身已经是 root，不需要 `sudo`。
-
-装完之后才需要的操作，分两处：**网页在「设置」页**，**命令行敲 `panelvps` 进菜单**。
-不再单独占一个导航标签——控制页要拉 BBR 状态，打开得等一两秒，而这些操作本来一个月也用不上一次。
-
-| 能力 | 网页 | 命令行 |
-|---|---|---|
-| 访问方式与端口 | 设置 → 访问方式 | 菜单第 6 项 |
-| 重置密码 | 设置 → 账号 | 菜单第 7 项 |
-| BBR 开关 | — | 菜单第 8 项 |
-| 重启面板 / Xray / 服务器 | 设置 → 重启面板；代理页重启 Xray | 菜单第 3 项 / 第 10 项 |
-
-网页改端口同样是「先 `net.Listen` 试绑 → 改配置 → 按新端口重新下发防火墙 → 重启」，
-防火墙失败则回滚配置并报错；命令行菜单走的是同一套 `internal/manage` 实现。
-
-BBR 这一项没有为了它放宽主服务的沙箱。主单元带 `ProtectKernelTunables=yes`，进程本身写不了 `/proc/sys`，
-与其为了一个开关拆掉加固，不如让一个独立的 oneshot 单元去干这件事：
-
-```ini
-# /etc/systemd/system/panelvps-sysctl.service
-ExecStartPre=-/sbin/modprobe tcp_bbr
-ExecStart=/sbin/sysctl -p /etc/sysctl.d/99-panelvps.conf
-```
-
-面板只负责写文件，再 `systemctl restart panelvps-sysctl` 让配置立即生效，不用 reboot。
-配置文件首行带 `# Managed by PanelVPS`，不是本面板生成的文件（比如你自己手写的 tuning）会拒绝覆盖，
-避免把别人的内核参数一起冲掉。
-
-这些接口网页和命令行都在用（网页只调访问方式与重置密码两项）：
-
-```
-GET    /api/v1/control                  面板 / 账号 / BBR / Xray / 防火墙 / 系统信息
-PUT    /api/v1/control/access           改监听地址与端口（confirm=ACCESS）
-POST   /api/v1/control/password         重置密码（confirm=RESET，mode=random|custom）
-POST   /api/v1/control/bbr              开 / 关 BBR（confirm=BBR）
-POST   /api/v1/control/xray/restart     重启 Xray
-POST   /api/v1/control/reboot           重启服务器（confirm=REBOOT）
-```
-
-## 代理接口
-
-```
-GET    /api/v1/proxies                     概览（状态 + 入站 + 用户 + 链接）
-POST   /api/v1/proxies/apply               重建并下发配置
-POST   /api/v1/proxies/traffic/collect     立即采样一次流量
-PUT    /api/v1/proxies/preferences          设置分享链接用的公网地址
-POST   /api/v1/proxies/keys/reality         生成 REALITY 密钥对
-POST   /api/v1/proxies/inbounds             新建入站
-PATCH  /api/v1/proxies/inbounds/{id}        修改入站（部分字段）
-DELETE /api/v1/proxies/inbounds/{id}        删除入站（级联删除用户）
-POST   /api/v1/proxies/inbounds/{id}/clients 新建用户
-PATCH  /api/v1/proxies/clients/{id}         修改用户
-DELETE /api/v1/proxies/clients/{id}         删除用户
-POST   /api/v1/proxies/clients/{id}/reset   重置流量
-GET    /api/v1/proxies/clients/{id}/links   分享链接
-GET    /api/v1/proxies/clients/{id}/qr      二维码 PNG
-```
-
-Xray 可执行文件按以下顺序探测：`PANELVPS_XRAY_BIN` 环境变量 → 配置项 `xray_bin`
-→ `/usr/local/bin/xray` → `/usr/bin/xray` → 面板同目录 → `PATH`。
-找不到时面板照常启动，只是代理页显示「不可用」。
-
-## 中转（端口转发）
-
-面板左侧「中转」页可以把本机端口收到的字节原样转给另一台机器。它解决的是
-「目标机器本身不可达、但手上还有一台可达机器」的情况：在被墙的机器上跑代理，
-在可达的那台机器上加一条中转规则，客户端连中转机即可。
-
-```
-GET    /api/v1/relays              规则列表（含实时上下行与连接数）
-POST   /api/v1/relays              新建规则
-PATCH  /api/v1/relays/{id}         修改规则
-DELETE /api/v1/relays/{id}         删除规则
-POST   /api/v1/relays/{id}/toggle  启用 / 停用
-```
-
-规则字段：`name`、`listen`（IP，默认 `0.0.0.0`）、`listen_port`、`target`（`host:port`）、
-`network`（`tcp` / `udp` / `both`）。转发引擎不经过 Xray，改规则不会重启 Xray，
-不会掐断在线的代理连接；统计只存在内存里，面板重启后清零。
-
-中转机没有装面板也能用同一个二进制跑：
-
-```bash
-panelvps relay -listen :8443 -to 1.2.3.4:443        # 只转 TCP
-panelvps relay -listen :8443 -to 1.2.3.4:443 -udp   # TCP + UDP
-```
-
-协议内容全程透传（REALITY / TLS / gRPC 都不受影响），客户端只改地址与端口，
-其余参数不动。
-
-
-## 目录结构
-
-```
-cmd/panelvps/        CLI 入口（serve / init / info / reset-password）
-internal/
-  auth/              密码哈希、密码策略、会话令牌、登录限流
-  backup/            备份打包、恢复、保留策略
-  config/            YAML 配置与校验
-  filemgr/           文件沙箱、浏览、读写、归档解包
-  firewall/          nftables / iptables 双后端、规则渲染与封禁
-  jobs/              异步任务执行器
-  logs/              固定来源的日志尾部读取、SSH 失败解析
-  metrics/           /proc 指标采集
-  notify/            Webhook 告警
-  relay/             TCP/UDP 端口转发（中转）引擎
-  selfupdate/        GitHub release 检查、校验与替换
-  server/            路由、中间件、API 处理器
-  sites/             Nginx 站点渲染、校验、证书
-  softstore/         声明式软件清单与安装器（manifests/*.yaml）
-  store/             SQLite 访问层与迁移（v1 认证 / v2 代理 / v3 运维 / v4 对外端口 / v5 中转）
-  sysinfo/           进程、服务、端口、网卡
-  terminal/          PTY 会话
-  version/           构建期注入的版本信息
-  xray/              配置生成、进程托管、统计读取、分享链接与二维码
-web/                 embed 的前端静态资源（零构建原生 JS）
-deploy/              systemd 单元、容器覆盖、安装与一键引导脚本
-scripts/             构建、发布（publish.sh）、冒烟测试与中转 UI 自测
-```
+想用 `IP:端口` 直接打开，加 `--public`；锁定版本、容器环境、国内自建分发源等细节见
+[docs/install.md](docs/install.md)。
+
+> 面板自己不做 HTTPS。公网直连请在前面套一层 TLS 反向代理，或至少用 16 位以上随机密码，
+> 并只放行自己的出口 IP。
+
+## 界面
+
+<p align="center">
+  <img src="docs/screenshots/proxy.png" alt="代理：Xray 入站与用户流量" width="430">&nbsp;&nbsp;
+  <img src="docs/screenshots/security.png" alt="安全：防火墙规则与外网攻击记录" width="430">
+</p>
+<p align="center">
+  <img src="docs/screenshots/files.png" alt="文件：搜索结果显示所在目录" width="430">&nbsp;&nbsp;
+  <img src="docs/screenshots/terminal.png" alt="终端：双标签独立会话" width="430">
+</p>
 
 ## 文档
 
-| 文件 | 说明 |
+| 文件 | 内容 |
 |---|---|
-| [PRDv0.3.md](PRDv0.3.md) | **当前有效版本**：需求、架构、安全设计、ADRs |
-| [PRDv0.2.md](PRDv0.2.md) | 上一版 |
-| [PRDv0.1.txt](PRDv0.1.txt) | 原始三句话需求 |
+| [docs/install.md](docs/install.md) | 安装、锁定版本、LXC / 容器、自建分发、管理菜单、验收测试 |
+| [docs/operations.md](docs/operations.md) | 各模块实现契约、systemd 沙箱、BBR、代理连不上排查、实测记录 |
+| [docs/api.md](docs/api.md) | HTTP 接口：控制、代理、中转 |
 | [PROVENANCE.md](PROVENANCE.md) | 代码来源与许可合规记录 |
+
+## 从源码构建
+
+```bash
+go build -trimpath -ldflags "-s -w" -o bin/panelvps ./cmd/panelvps
+./bin/panelvps serve        # 首次启动会打印初始密码，只打印一次、不落盘
+```
+
+交叉编译两个架构：`./scripts/build.sh`。
+
+```
+cmd/panelvps/     CLI 入口（serve / init / info / reset-password / relay）
+internal/         认证、文件沙箱、防火墙、Xray、站点、商店、备份、自更新…
+web/              embed 的前端（零构建原生 JS + xterm.js）
+deploy/           systemd 单元、容器覆盖、安装与引导脚本
+scripts/          构建、发布、冒烟测试、UI 自测
+```
 
 ## 许可
 
-[Apache License 2.0](LICENSE)。可以商用、修改、闭源分发，需保留版权与许可声明，并附带 NOTICE 类声明；
-贡献者授予专利许可，同时不得用专利起诉本项目使用者。
-
-本项目采用洁净室实现，未复制 GPL 代码，因此许可选择不受上游传染；详见 [PROVENANCE.md](PROVENANCE.md)。
+[Apache License 2.0](LICENSE)。可商用、修改、闭源分发，需保留版权与许可声明。
+洁净室实现，未复制 GPL 代码，详见 [PROVENANCE.md](PROVENANCE.md)。
 
 ## 参与
 
-- **安全问题**：请不要开 public issue，走 GitHub 的私有漏洞报告（Security → Report a vulnerability）
-- **功能与缺陷**：开 issue 时附上发行版、架构、`panelvps info` 输出与相关日志
-- **代码**：fork → 分支 → 提 PR；提交前跑 `go vet ./...`、`go test ./...`、`python -m py_compile scripts/smoke_test.py`
-
+- **安全问题**：请不要开 public issue，走 GitHub 私有漏洞报告（Security → Report a vulnerability）
+- **功能与缺陷**：issue 里附上发行版、架构、`panelvps info` 输出与相关日志
+- **代码**：fork → 分支 → PR，提交前跑 `go vet ./...`、`go test ./...`、
+  `python -m py_compile scripts/smoke_test.py`
