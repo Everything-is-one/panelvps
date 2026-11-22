@@ -30,13 +30,18 @@ done
 echo
 ls -lh dist/
 
-# 校验和必须写成「<hash>  <纯文件名>」：早期版本用 `sha256sum bin/xxx` 生成，
-# 面板按资产名精确匹配时会找不到；Windows 上的 sha256sum 还会多带一个 * 前缀。
+# 校验和必须写成「<hash>  bin/<文件名>」：
+#   - deploy/bootstrap.sh 用 `grep -E "bin/$BIN$"` 定位条目，再从 $TMP 目录
+#     执行 `sha256sum -c`，二进制就落在 $TMP/bin/ 下。写成纯文件名会让 grep
+#     匹配不到任何行，sha256sum 拿到空输入直接报失败（v0.3.15 安装即踩过）。
+#   - 面板内自更新的 parseChecksum 走 path.Base()，带上目录前缀同样识别。
+#   - 自建分发（--base）目录里二进制本来就在 bin/ 下，格式保持一致。
+# 注意别用 `sha256sum bin/xxx` 直接生成：Windows 上的实现会多带一个 * 前缀。
 : > dist/SHA256SUMS
 for f in dist/panelvps-linux-amd64 dist/panelvps-linux-arm64; do
     [ -f "$f" ] || continue
     sum="$(sha256sum "$f" | cut -d' ' -f1)"
-    printf '%s  %s\n' "$sum" "$(basename "$f")" >> dist/SHA256SUMS
+    printf '%s  %s\n' "$sum" "bin/$(basename "$f")" >> dist/SHA256SUMS
 done
 echo "[*] dist/SHA256SUMS:"
 cat dist/SHA256SUMS

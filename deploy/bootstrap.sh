@@ -197,6 +197,31 @@ fetch_sums() {
         fetch_release_asset "SHA256SUMS" "$out" || return 1
     fi
     [[ -s "$out" ]] || { rm -f "$out"; return 1; }
+    # 清单可能来自 Windows 侧的打包工具，CR 会让 `$` 锚点匹配不上
+    sed -i 's/\r$//' "$out" 2>/dev/null || true
+    return 0
+}
+
+# 校验下载到的二进制。
+#
+# SHA256SUMS 里的路径有两种写法：本仓库 build.sh 与自建分发都写 `bin/<name>`
+# （二进制也确实下到 $TMP/bin/），另有一些工具只写纯文件名。两种都要认，
+# 但必须真的找到该架构的条目，不能对着空输入跑校验 —— v0.3.15 就是这样：
+# 清单写纯名、脚本只 grep `bin/` 前缀，一行都匹配不到，`sha256sum -c` 收到
+# 空标准输入必然非零退出，于是被报成「二进制损坏或被篡改」，实际文件没问题。
+verify_bin() {
+    local entry dir
+    entry=$(grep -E "bin/$BIN\$" "$TMP/SHA256SUMS" | head -1)
+    if [[ -n "$entry" ]]; then
+        dir="$TMP"
+    else
+        entry=$(grep -E "(^|[[:space:]])\*?$BIN\$" "$TMP/SHA256SUMS" | head -1)
+        dir="$TMP/bin"
+    fi
+    [[ -n "$entry" ]] || die "SHA256SUMS 里没有 $BIN 的校验值，清单可能不含该架构"
+    printf '%s\n' "$entry" | ( cd "$dir" && sha256sum -c - ) >/dev/null 2>&1 \
+        || die "SHA256 校验失败，二进制可能损坏或被篡改"
+    info "SHA256 校验通过"
 }
 
 info "仓库 $REPO @ $REF，架构 $ARCH"
@@ -223,10 +248,8 @@ if [[ "$CHECK_ONLY" -eq 0 ]]; then
     fetch_bin
     if [[ -f "$TMP/SHA256SUMS" ]]; then
         # sha256sum 的输出可能是 "  bin/x"（文本模式）或 "*bin/x"（二进制模式），
-        # 这里只按文件名匹配，两种都能吃。
-        ( cd "$TMP" && grep -E "bin/$BIN\$" SHA256SUMS | sha256sum -c - ) >/dev/null 2>&1 \
-            || die "SHA256 校验失败，二进制可能损坏或被篡改"
-        info "SHA256 校验通过"
+        # 也可能没有目录前缀；统一交给 verify_bin 判定。
+        verify_bin
     fi
 fi
 
