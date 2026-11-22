@@ -15,7 +15,9 @@ README 只讲「能做什么」，本文讲「做到什么程度、为什么这�
 |---|---|
 | 认证 | argon2id（m=19MiB，低内存档）、12 位起步的密码策略、弱密码表 |
 | 会话 | 令牌只存 SHA-256、HttpOnly + SameSite=Lax、改密后踢掉所有旧会话 |
-| 防爆破 | 同 IP 5 次失败封 1 小时，进程内计数 |
+| 防爆破 | 同 IP 10 分钟内失败 5 次封 1 小时；达到 `ssh_guard_perma_threshold`（默认 10）直接永久封禁 |
+| 暴露面 | 可设访问后缀 `access_path`，不带前缀的路径（含 `/api/v1/auth/login`）一律 404 |
+| 归属地 | 攻击记录按需查询来源国家，结果缓存 12 小时，查询失败只留空 |
 | CSRF | 双提交 Cookie + `X-CSRF-Token` 请求头 |
 | 响应头 | CSP、HSTS、nosniff、DENY frame、no-referrer |
 | 审计 | 只追加表，`UPDATE`/`DELETE` 由 SQLite 触发器拦截 |
@@ -24,6 +26,63 @@ README 只讲「能做什么」，本文讲「做到什么程度、为什么这�
 
 > 前端全程零构建原生 JS（约 2000 行），目的是让 `go build` 不依赖 Node。
 > 需要更强的交互时再上 Vue，二进制接口不变（ADR-05）。
+
+## 安全运维：端口、封禁与访问后缀
+
+### 改 SSH 端口（`panelvps` 第 11 项）
+
+默认 22 端口每天要吃几百到几千次爆破尝试。改端口的顺序是固定的，任一步失败整份回滚：
+
+1. 备份 `sshd_config` 与所有 `sshd_config.d/*.conf`
+2. 注释掉所有生效的 `Port` 行 —— sshd 的 `Port` 是**累加**的，留着旧值就会同时监听两个端口
+3. 在主配置最前面写 `Port <新端口>`（排在 `Include` 之前，即使 drop-in 里又冒出一条也压得住）
+4. `sshd -t` 校验语法与 host key
+5. 放行 ufw（若启用）与面板自己的规则链，并把新端口写进 `ssh_ports`
+6. `systemctl reload ssh`（RHEL 是 `sshd`），失败再退到 `pkill -HUP sshd`
+
+**只 reload 不 restart**：reload 不会掐断已建立的连接，而 restart 会让当前会话断在改配置的
+中途。改完先别关当前窗口，另开一个终端用 `ssh -p <新端口>` 验证成功，再去云厂商安全组
+放行同一个端口。
+
+### 封禁的生命周期
+
+| 场景 | 触发 | 时长 |
+|---|---|---|
+| 自动临时封禁 | 窗口内失败次数 ≥ `ssh_guard_threshold`（默认 5） | `ssh_guard_ban`（默认 1h） |
+| 自动永久封禁 | 窗口内失败次数 ≥ `ssh_guard_perma_threshold`（默认 10） | 十年（见下） |
+| 手动封禁 | 安全页「封禁 N 分钟」或「永久封禁」 | 自选 / 永久 |
+
+nftables 后端的 set **不再声明默认 timeout**，每条元素自己带 `timeout`。之前 set 上写了
+`timeout 1h`，任何不显式指定超时的元素都会被压成一小时，永久封禁也就名存实亡。
+
+「永久」在两个后端都实现为十年：nft 没有「永不过期」这个取值，十年对一台 VPS 等同于永久，
+好处是不必为永久封禁单独建集合、单独改链，升级时规则不会对不上。界面上显示为「永久」。
+
+iptables 后端没有超时能力，到期时刻写进规则注释（`panelvps-ban:<unix>`，0 表示永久），
+由每分钟的后台任务 `SweepExpiredBans` 清理。**0.3.16 及更早这里是个 bug**：注释是固定
+字符串，没有任何清理逻辑，所谓「封 60 分钟」在 iptables 模式下永远不会解除。
+
+`Apply`（点「下发规则到内核」）会 flush 整张 nft 表，集合里的元素也会被清空。现在会在
+flush 前记下现有封禁、重建后按剩余时间补回，避免一次下发把所有攻击者放出来。
+
+### 访问后缀
+
+设置 `access_path` 后，只有 `/<后缀>/...` 能进来：
+
+- 根路径、`/.env`、`/wp-login.php`、`/api/v1/auth/login` 全部 404，且不跳转、不返回 403
+  —— 任何「这里有个面板」的信号都会让扫描器换条路继续试
+- `/healthz` 保持原样，监控脚本不受影响
+- 前端通过 `index.html` 里的 `<meta name="pv-base">` 得到前缀，接口、静态资源、WebSocket
+  与下载链接都会自动带上（内联 `<script>` 会被 CSP 的 `script-src 'self'` 拦掉，所以用 meta）
+- 改完立即生效，页面会自动跳到新地址；忘了后缀可用 `panelvps` 第 12 项查看或修改
+
+这是**收窄暴露面**，不是认证手段：真正的防线仍然是强密码、登录限流与 TLS。
+
+### IP 归属地
+
+安全页的「归属地」列走在线查询（ip-api.com，中文国名），结果在内存里缓存 12 小时。
+只发送攻击来源 IP 本身，不发送任何面板数据。查询失败（机器不出网、接口不可用）时该列
+显示「—」，不影响其余功能；也可以关掉 `geoip_enabled` 省下这几秒。
 
 ## 代理（Xray）契约
 
@@ -131,7 +190,21 @@ REALITY 层，先核对客户端里的**公钥（pbk）与 shortId** 是否与�
 sudo mkdir -p /usr/local/share/xray && sudo systemctl restart panelvps
 ```
 
-升级到 v0.3.5+ 会重写单元、预创建常用目录，以上都不必手动做。
+现在的单元在 `-/etc -/usr -/var` 之外**再点名**了软件商店实际落地的目录：
+
+```
+ReadWritePaths=-/usr/local/bin -/usr/local/share -/usr/local/etc -/etc/systemd/system -/etc/xray
+```
+
+两个原因让「放开 `/usr`」不等于「`/usr/local/bin` 可写」：单元是旧版本时根本没有这条；
+以及 `ReadWritePaths` 的 bind 挂载不覆盖更内层的独立挂载点。装 Xray 报
+`open /usr/local/bin/.pv-write-probe-...: read-only file system` 时按这个顺序处理：
+
+1. 「设置 → 服务单元」看是否显示「需要更新」——升级只换二进制不换单元，这是最常见的原因；
+   点「用内置版本覆盖」后重启面板；
+2. 再确认目录存在：`mkdir -p /usr/local/bin /usr/local/share`（systemd 对不存在的路径静默跳过）。
+
+升级到 v0.3.5+ 会重写单元、预创建常用目录，以上通常不必手动做。
 `sudo ./install.sh --check` 可复核当前单元与目录状态。
 
 从 v0.3.6 起，「设置 → 服务单元」会比对磁盘上的单元与当前二进制内置的版本：不一致时显示
