@@ -64,12 +64,7 @@ ssh -L 20873:127.0.0.1:20873 root@<服务器IP>
 ## 界面
 
 <p align="center">
-  <img src="docs/screenshots/proxy.png" alt="代理：Xray 入站与用户流量" width="430">&nbsp;&nbsp;
-  <img src="docs/screenshots/security.png" alt="安全：防火墙规则与外网攻击记录" width="430">
-</p>
-<p align="center">
-  <img src="docs/screenshots/files.png" alt="文件：搜索结果显示所在目录" width="430">&nbsp;&nbsp;
-  <img src="docs/screenshots/terminal.png" alt="终端：双标签独立会话" width="430">
+  <img src="docs/screenshots/showcase.png" alt="代理、安全、文件、终端" width="880">
 </p>
 
 ## 文档
