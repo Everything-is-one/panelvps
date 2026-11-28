@@ -127,7 +127,7 @@ func (s *Server) handleProxiesOverview(w http.ResponseWriter, r *http.Request) {
 
 	ok(w, map[string]any{
 		"status":      s.xr.Status(),
-		"host":        host,
+		"host":        s.publicHostSetting(r),
 		"public_port": globalPort,
 		"inbounds":    views,
 		"protocols":   []string{"vless", "vmess", "trojan", "shadowsocks"},
@@ -853,8 +853,8 @@ func (s *Server) handleSavePrefs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	host := strings.TrimSpace(req.PublicHost)
-	if host != "" && strings.ContainsAny(host, " /?#") {
-		fail(w, http.StatusBadRequest, codeBadRequest, "公网地址不能包含空格或路径")
+	if err := s.checkPublicHost(host); err != nil {
+		fail(w, http.StatusBadRequest, codeBadRequest, err.Error())
 		return
 	}
 	if err := s.st.SetSetting(r.Context(), "public_host", host); err != nil {
@@ -862,7 +862,7 @@ func (s *Server) handleSavePrefs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "prefs_update", "public_host", host)
-	ok(w, map[string]any{"host": s.publicHost(r)})
+	ok(w, map[string]any{"host": s.publicHostSetting(r)})
 }
 
 // handleApply 手动触发一次「重建配置 + 重启」。
@@ -1030,13 +1030,19 @@ func (s *Server) CollectTraffic(ctx context.Context) error {
 //
 // 返回的 port 为 0 表示「没有全局端口覆盖」，由入站自己的 public_port
 // 或监听端口决定。
+//
+// 只有配置里明确写了端口才算数。从请求头推断时只取主机：Host 里的端口
+// 是「当前这个面板的访问端口」，与节点监听端口毫无关系。面板跑在
+// IP:20873 上时若采信它，不管入站随机到哪个端口，链接都会写成 :20873。
 func (s *Server) publicTarget(r *http.Request) (string, int) {
 	raw := ""
+	explicit := true
 	if v, err := s.st.GetSetting(r.Context(), "public_host"); err == nil && v != "" {
 		raw = v
 	} else if s.cfg.PublicHost != "" {
 		raw = s.cfg.PublicHost
 	} else {
+		explicit = false
 		raw = r.Header.Get("X-Forwarded-Host")
 		if raw == "" {
 			raw = r.Host
@@ -1044,7 +1050,57 @@ func (s *Server) publicTarget(r *http.Request) (string, int) {
 	}
 	raw = strings.TrimSpace(raw)
 	host, port := splitPublicHost(raw)
+	if !explicit {
+		port = 0
+	} else if port > 0 && s.portIsPanel(port) {
+		// 历史配置里可能早就把面板端口写进去了（旧版本会照抄 Host 头），
+		// 保存校验拦不住存量数据，这里直接忽略，免得链接继续指向面板。
+		if s.logger != nil {
+			s.logger.Warn("公网地址里的端口是面板自己的访问端口，已忽略", "host", raw, "port", port)
+		}
+		port = 0
+	}
 	return host, port
+}
+
+// portIsPanel 判断 p 是不是面板自己占着的端口。
+//
+// 面板只监听回环时（前面有 Nginx），公网这个端口其实是空的，节点可以
+// 合法借用，所以那种情况不算冲突。
+func (s *Server) portIsPanel(p int) bool {
+	host, port, err := net.SplitHostPort(s.cfg.Listen)
+	if err != nil {
+		return false
+	}
+	if v, _ := strconv.Atoi(port); v != p {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return false
+	}
+	return true
+}
+
+// checkPublicHost 校验设置里填的公网地址。
+//
+// 除了格式，还要拦住「把面板自己的访问端口填进来」这种常见误填：
+// 节点不可能监听面板端口（新建入站时会拒绝），写进链接只会让客户端
+// 连到面板上，报一个谁也看不懂的握手失败。
+func (s *Server) checkPublicHost(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	if strings.ContainsAny(raw, " /?#") {
+		return errors.New("公网地址不能包含空格或路径")
+	}
+	_, port := splitPublicHost(raw)
+	if port == 0 {
+		return nil
+	}
+	if s.portIsPanel(port) {
+		return fmt.Errorf("%d 是面板自己的访问端口，节点不会监听它；请去掉端口，或填节点实际对外的端口", port)
+	}
+	return nil
 }
 
 // splitPublicHost 把用户填的「地址」统一成 (主机, 端口)。
@@ -1080,6 +1136,22 @@ func linkPort(in store.Inbound, globalPort int) int {
 func (s *Server) publicHost(r *http.Request) string {
 	h, _ := s.publicTarget(r)
 	return h
+}
+
+// publicHostSetting 给设置页回填用：有配置就原样返回（可能带端口），
+// 没配置时给出推断到的主机名。
+//
+// 不能回填 publicHost：它把端口抹掉了，NAT 用户保存一次别的设置，
+// 「IP:30986」就会被悄悄写成「IP」，链接跟着坏掉。
+func (s *Server) publicHostSetting(r *http.Request) string {
+	if v, err := s.st.GetSetting(r.Context(), "public_host"); err == nil && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	if s.cfg.PublicHost != "" {
+		return strings.TrimSpace(s.cfg.PublicHost)
+	}
+	host, _ := s.publicTarget(r)
+	return host
 }
 
 func (s *Server) audit(r *http.Request, action, target, detail string) {

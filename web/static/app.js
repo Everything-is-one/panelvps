@@ -1190,7 +1190,7 @@ function renderProxyView(root) {
     ]),
     el("div", { class: "card section" }, [
       el("h2", { text: "分享链接地址" }),
-      el("p", { class: "sub", text: "客户端连接用的公网地址。默认取当前访问域名，VPS 上建议填真实 IP 或域名。NAT / 端口映射的机器可以连端口一起填，例如 1.2.3.4:30986。" }),
+      el("p", { class: "sub", text: "客户端连接用的公网地址。默认取当前访问域名，VPS 上建议填真实 IP 或域名。地址后面不用带面板端口——链接里的端口取入站自己的；只有 NAT / 端口映射的机器才要写端口，例如 1.2.3.4:30986。" }),
       el("div", { class: "row wrap" }, [
         hostInput,
         el("button", { class: "ghost", text: "保存", onclick: async () => {
@@ -4660,7 +4660,7 @@ function renderSettingsView(root) {
       apMsg,
     ]),
     card("基本设置", [
-      field("公网地址", host, "用于生成分享链接；可填 IP、域名，NAT 机器可写 IP:端口"),
+      field("公网地址", host, "用于生成分享链接；可填 IP、域名。端口只在 NAT / 端口映射时填，别填面板自己的访问端口"),
       field("告警 Webhook", webhook, "留空则关闭。事件以 JSON POST 推送，5 分钟内相同标题只发一次"),
       el("label", { class: "row" }, [guard, el("span", { text: "启用 SSH 爆破自动封禁" })]),
       field("失败次数阈值", threshold, "窗口 10 分钟（配置项 ssh_guard_window）"),

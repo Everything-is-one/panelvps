@@ -101,7 +101,7 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ok(w, map[string]any{
-		"public_host":   s.publicHost(r),
+		"public_host":   s.publicHostSetting(r),
 		"alert_webhook": s.cfg.AlertWebhook,
 		"access_path":   s.currentAccessPath(),
 		"geoip":         s.geoOn.Load(),
@@ -158,8 +158,8 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) {
 
 	if req.PublicHost != nil {
 		host := strings.TrimSpace(*req.PublicHost)
-		if host != "" && strings.ContainsAny(host, " /?#") {
-			fail(w, http.StatusBadRequest, codeBadRequest, "公网地址不能包含空格或路径")
+		if err := s.checkPublicHost(host); err != nil {
+			fail(w, http.StatusBadRequest, codeBadRequest, err.Error())
 			return
 		}
 		if err := s.st.SetSetting(ctx, "public_host", host); err != nil {
