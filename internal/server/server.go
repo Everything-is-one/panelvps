@@ -24,6 +24,7 @@ import (
 	"github.com/Everything-is-one/panelvps/internal/filemgr"
 	"github.com/Everything-is-one/panelvps/internal/geoip"
 	"github.com/Everything-is-one/panelvps/internal/jobs"
+	"github.com/Everything-is-one/panelvps/internal/junk"
 	"github.com/Everything-is-one/panelvps/internal/metrics"
 	"github.com/Everything-is-one/panelvps/internal/notify"
 	"github.com/Everything-is-one/panelvps/internal/relay"
@@ -75,6 +76,7 @@ type Server struct {
 	jobs     *jobs.Manager
 	relays   *relay.Manager
 	disk     *metrics.DiskScanner
+	junkScan *junk.Scanner
 	geo      *geoip.Resolver
 
 	// accessPath 是生效中的访问后缀。放在这里而不是只读 cfg：
@@ -188,6 +190,7 @@ func New(cfg *config.Config, st *store.Store, logger *slog.Logger) (*Server, err
 	s.jobs = jobs.New(60, 2)
 	s.termTicket = map[string]time.Time{}
 	s.disk = metrics.NewDiskScanner()
+	s.junkScan = junk.NewScanner(junk.Options{DataDir: cfg.DataDir})
 	s.geo = geoip.New()
 	s.accessPath.Store(cfg.AccessPath)
 	s.permaThreshold.Store(int32(cfg.SSHGuardPermaThreshold))
@@ -251,6 +254,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/audit", s.requireAuth(s.handleAuditList))
 	// 磁盘占用分析：异步扫描 + 轮询，避免几十万文件的遍历把请求挂死
 	s.mux.HandleFunc("GET /api/v1/system/disk-usage", s.requireAuth(s.handleDiskUsage))
+	// 磁盘垃圾清理：同样是异步扫描；清理动作只认类别键，路径在服务端写死
+	s.mux.HandleFunc("GET /api/v1/system/junk", s.requireAuth(s.handleJunkScan))
+	s.mux.HandleFunc("POST /api/v1/system/junk/clean", s.requireAuth(s.handleJunkClean))
 
 	// 控制台：访问方式、账号、BBR、重启
 	s.mux.HandleFunc("GET /api/v1/control", s.requireAuth(s.handleControlStatus))

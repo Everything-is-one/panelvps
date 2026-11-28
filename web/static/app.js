@@ -584,6 +584,7 @@ function openDiskUsage(startPath) {
     const head = el("div", { class: "du-head" }, [
       el("span", { class: "mono du-path", text: report.path }),
       el("div", { class: "spacer" }),
+      el("button", { class: "ghost", text: "垃圾清理", onclick: () => { m.close(); renderApp("junk"); } }),
       path !== "/" ? el("button", { class: "ghost", text: "上一级", onclick: () => { path = parentPath(path); load(false); } }) : null,
       el("button", { class: "ghost", text: "重新扫描", onclick: () => load(true) }),
     ]);
@@ -627,7 +628,7 @@ function openDiskUsage(startPath) {
           el("tbody", {}, rows),
         ]),
       ]),
-      el("div", { class: "hint", style: "margin-top:10px", text: "点目录名继续下钻；数字按实际占用块统计，与 du 口径一致（不跨文件系统）。" }),
+      el("div", { class: "hint", style: "margin-top:10px", text: "点目录名继续下钻；数字按实际占用块统计，与 du 口径一致（不跨文件系统）。包缓存、已轮转日志与临时文件可在「清理」页一键回收。" }),
     );
   };
 
@@ -786,6 +787,7 @@ const NAV_ICONS = {
   terminal: "M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v13A1.5 1.5 0 0 1 18.5 20h-13A1.5 1.5 0 0 1 4 18.5zM8 10l3 2.5L8 15M13 15h4",
   firewall: "M12 4l7.8 2.9v5.2c0 4.6-3.2 7.7-7.8 8.8-4.6-1.1-7.8-4.2-7.8-8.8V6.9z",
   logs: "M4 6h1.6M8 6h12M4 12h1.6M8 12h12M4 18h1.6M8 18h6",
+  junk: "M5 7h14M9.5 7V5.2c0-.7.5-1.2 1.2-1.2h2.6c.7 0 1.2.5 1.2 1.2V7M7 7l.8 11.2c.05.9.8 1.6 1.7 1.6h5c.9 0 1.65-.7 1.7-1.6L17 7M10 11v5M14 11v5",
   store: "M4.5 8h15l-1 12h-13zM8.5 8V6.5a3.5 3.5 0 0 1 7 0V8",
   backup: "M4 7c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3m0 0v10c0 1.7 3.6 3 8 3s8-1.3 8-3V7M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
   settings: "M4 7h4M12 7h8M4 17h8M16 17h4M10 5a2 2 0 1 0 0 4 2 2 0 0 0 0-4M14 15a2 2 0 1 0 0 4 2 2 0 0 0 0-4",
@@ -796,7 +798,7 @@ const NAV_ICONS = {
 const NAV_GROUPS = [
   ["", [["overview", "概览"]]],
   ["网络", [["proxy", "代理"], ["users", "用户"], ["relay", "中转"], ["sites", "网站"], ["firewall", "安全"]]],
-  ["系统", [["files", "文件"], ["terminal", "终端"], ["logs", "日志"],
+  ["系统", [["files", "文件"], ["terminal", "终端"], ["logs", "日志"], ["junk", "清理"],
             ["store", "商店"], ["backup", "备份"], ["settings", "设置"]]],
 ];
 
@@ -810,6 +812,7 @@ const VIEW_META = {
   terminal: ["终端", "以 root 身份执行命令"],
   firewall: ["安全", "防火墙、封禁与外网扫描爆破记录"],
   logs: ["日志", "面板运行日志与系统日志"],
+  junk: ["清理", "包缓存、日志归档、临时文件与悬空镜像"],
   store: ["商店", "一键安装常用服务"],
   backup: ["备份", "数据库、配置与站点打包"],
   settings: ["设置", "访问方式、账号与路径配置"],
@@ -926,6 +929,7 @@ function renderApp(view) {
     case "terminal": renderTerminalView(content); break;
     case "firewall": renderSecurityView(content); break;
     case "logs": renderLogsView(content); break;
+    case "junk": renderJunkView(content); break;
     case "store": renderStoreView(content); break;
     case "backup": renderBackupView(content); break;
     case "settings": renderSettingsView(content); break;
@@ -3333,6 +3337,281 @@ function sourceOption(s) {
   if (s.kind === "file" && numv(s.size) > 0) t += " · " + fmtBytes(s.size);
   if (!s.present) t += "（不可用）";
   return t;
+}
+
+// ---------- 磁盘垃圾清理 ----------
+//
+// 这个页面回答的不是「谁占了大头」（那是磁盘下钻），而是「哪些一看就是垃圾、
+// 可以现在收掉」。所以每一项都要写清删什么、不碰什么；只有 safe 项默认勾选，
+// journald / Docker / 回收站这种有外部影响的留给用户自己决定。
+function renderJunkView(root) {
+  const gen = state.gen;
+  const alive = () => gen === state.gen;
+
+  let report = null;
+  let timer = null;
+  let seq = 0;
+  let busy = false;
+  let scanning = false;
+  // 用户动过勾选后，重新扫描不再覆盖他的选择（否则每扫一次就白勾一次）
+  let touched = false;
+  const selected = new Set();
+  const rowRefs = [];
+
+  const tbody = el("tbody", {}, [tableNoticeRow("正在扫描…", 5)]);
+  const msg = el("div", { class: "msg" });
+  const summary = el("div", { class: "hint", text: "正在统计各类垃圾的占用…" });
+  const diskLine = el("div", { class: "hint", text: "" });
+  const selText = el("span", { class: "selection-text" });
+  const selBytes = el("span", { class: "selection-size" });
+  // 这两个 span 必须挂进选择栏，否则显示出来是一条空色带
+  const selBar = el("div", { class: "selection-bar", style: "display:none" }, [selText, selBytes]);
+  const headCb = el("input", { type: "checkbox", title: "全选可清理项" });
+  const scanBtn = el("button", { class: "ghost", text: "重新扫描", onclick: () => load(true) });
+  const cleanBtn = el("button", {
+    class: "ghost danger", text: "清理选中", disabled: true,
+    onclick: () => { if (selected.size) clean(Array.from(selected)); },
+  });
+
+  const items = () => (report && report.items) || [];
+  const cleanable = () => items().filter((it) => it.present && numv(it.bytes) > 0);
+
+  const syncBar = () => {
+    let bytes = 0, n = 0;
+    for (const it of items()) {
+      if (!selected.has(it.key)) continue;
+      n++;
+      bytes += numv(it.bytes);
+    }
+    selBar.style.display = n ? "" : "none";
+    selText.textContent = "已选 " + n + " 项";
+    selBytes.textContent = fmtBytes(bytes);
+    const list = cleanable();
+    const on = list.filter((it) => selected.has(it.key)).length;
+    headCb.checked = list.length > 0 && on === list.length;
+    headCb.indeterminate = on > 0 && on < list.length;
+    headCb.disabled = list.length === 0;
+    cleanBtn.disabled = busy || scanning || n === 0;
+    scanBtn.disabled = busy || scanning;
+  };
+
+  const applySelection = () => {
+    for (const r of rowRefs) {
+      const on = selected.has(r.it.key);
+      r.cb.checked = on;
+      r.tr.classList.toggle("selected", on);
+    }
+    syncBar();
+  };
+
+  const paint = (rep) => {
+    report = rep;
+    rowRefs.length = 0;
+    if (!touched) {
+      selected.clear();
+      for (const it of items()) {
+        if (it.default_on && it.present && numv(it.bytes) > 0) selected.add(it.key);
+      }
+    } else {
+      // 清理或重扫后某些类别可能不再可清，勾选里不能留幽灵键
+      for (const k of Array.from(selected)) {
+        if (!cleanable().some((it) => it.key === k)) selected.delete(k);
+      }
+    }
+
+    const rows = items().map((it) => {
+      const cb = el("input", { type: "checkbox" });
+      cb.disabled = !(it.present && numv(it.bytes) > 0);
+      const tr = el("tr", {}, []);
+      cb.addEventListener("change", () => {
+        touched = true;
+        if (cb.checked) selected.add(it.key); else selected.delete(it.key);
+        tr.classList.toggle("selected", cb.checked);
+        syncBar();
+      });
+
+      const hint = el("div", { class: "hint junk-hint" });
+      if (!it.present) hint.textContent = it.note || "当前位置不存在或不可用";
+      else if (numv(it.bytes) === 0) hint.textContent = it.note || "没有可清理的内容";
+      else hint.textContent = it.hint + (it.note ? "（" + it.note + "）" : "");
+
+      const size = numv(it.bytes) > 0
+        ? el("span", { text: fmtBytes(it.bytes) })
+        : el("span", { class: "muted", text: "0 B" });
+
+      tr.replaceChildren(
+        el("td", { class: "check" }, [cb]),
+        el("td", { class: "junk-item" }, [
+          el("div", { class: "junk-name" }, [
+            el("strong", { text: it.label }),
+            it.risk === "caution" ? badge("注意影响", "warn") : badge("可放心清理", "ok"),
+          ]),
+          el("div", { class: "mono muted junk-detail", text: it.detail }),
+          hint,
+        ]),
+        el("td", { class: "mono" }, [size]),
+        el("td", { class: "mono muted", text: it.files ? fmtNum(it.files) : "—" }),
+        el("td", {}, [
+          it.present && numv(it.bytes) > 0
+            ? el("button", { class: "link danger", text: "清理", onclick: () => clean([it.key]) })
+            : el("span", { class: "muted", text: "—" }),
+        ]),
+      );
+      rowRefs.push({ it, cb, tr });
+      return tr;
+    });
+
+    tbody.replaceChildren.apply(tbody, rows.length ? rows : [tableNoticeRow("没有可扫描的类别", 5)]);
+    applySelection();
+
+    const safe = items().filter((it) => it.risk === "safe" && it.present && numv(it.bytes) > 0);
+    const safeBytes = safe.reduce((a, it) => a + numv(it.bytes), 0);
+    summary.textContent = items().length
+      ? "合计可回收 " + fmtBytes(numv(rep.total)) + " · " + fmtNum(numv(rep.files)) + " 个文件" +
+        (safe.length ? "；其中安全项 " + fmtBytes(safeBytes) : "")
+      : "";
+  };
+
+  const paintProgress = (st) => {
+    summary.textContent = "正在扫描：" + (st.current || "…") +
+      "（" + numv(st.done) + "/" + numv(st.total) + " 项）";
+    if (!report) {
+      tbody.replaceChildren(tableNoticeRow(
+        "正在统计各类垃圾的占用… 已完成 " + numv(st.done) + "/" + numv(st.total) + " 项", 5));
+    }
+    syncBar();
+  };
+
+  const load = async (refresh) => {
+    const my = ++seq;
+    if (timer) { clearTimeout(timer); timer = null; }
+    scanning = true;
+    syncBar();
+    msg.className = "msg";
+    msg.textContent = "";
+    try {
+      const st = await api("GET", "/api/v1/system/junk" + (refresh ? "?refresh=1" : ""));
+      if (!alive() || my !== seq) return;
+      if (st.state === "running") {
+        paintProgress(st);
+        // 与磁盘占用分析同一节奏：扫描是后台任务，700ms 问一次进度
+        timer = setTimeout(() => { if (alive() && my === seq) load(false); }, 700);
+        return;
+      }
+      scanning = false;
+      paint(st.report || { items: [] });
+    } catch (e) {
+      if (!alive() || my !== seq || isCancel(e)) return;
+      scanning = false;
+      msg.className = "msg err";
+      msg.textContent = "扫描失败：" + e.message;
+      summary.textContent = "";
+      syncBar();
+    }
+  };
+
+  const loadDisk = async () => {
+    try {
+      const d = await api("GET", "/api/v1/system/stat");
+      if (!alive()) return;
+      const m = d.metrics || {};
+      const total = numv(m.disk_total), used = numv(m.disk_used);
+      diskLine.textContent = total > 0
+        ? "磁盘已用 " + fmtBytes(used) + " / 共 " + fmtBytes(total) +
+          "，可用 " + fmtBytes(Math.max(0, total - used))
+        : "当前系统读不到磁盘容量（非 Linux 开发环境）";
+    } catch (e) {
+      if (!isCancel(e) && alive()) diskLine.textContent = "";
+    }
+  };
+
+  // 不可逆：确认框逐条列出「清什么、多大、有什么影响」，与后端的
+  // confirm=CLEAN 是两层，误点一次按钮不会直接删东西。
+  const clean = async (keys) => {
+    const picked = items().filter((it) => keys.indexOf(it.key) >= 0);
+    if (!picked.length) return;
+    const total = picked.reduce((a, it) => a + numv(it.bytes), 0);
+    const lines = picked.map((it) => "· " + it.label + " — " + fmtBytes(numv(it.bytes)) +
+      (it.files ? "（" + fmtNum(it.files) + " 个文件）" : ""));
+    const caution = picked.filter((it) => it.risk === "caution");
+    let text = "将永久清理以下内容：\n" + lines.join("\n") + "\n合计 " + fmtBytes(total) + "。";
+    if (caution.length) {
+      text += "\n\n注意影响：\n" + caution.map((it) => "· " + it.label + "：" + it.hint).join("\n");
+    }
+    text += "\n\n删除后无法恢复，确认继续？";
+    if (!confirm(text)) return;
+
+    busy = true;
+    syncBar();
+    msg.className = "msg";
+    msg.textContent = "清理中…";
+    try {
+      const r = await api("POST", "/api/v1/system/junk/clean",
+        { keys, confirm: "CLEAN" }, { timeout: 180000 });
+      const errs = (r.items || []).filter((x) => x.error);
+      const notes = (r.items || []).filter((x) => x.note && !x.error)
+        .map((x) => x.label + "：" + x.note);
+      msg.className = errs.length ? "msg err" : "msg ok";
+      msg.textContent = "已释放 " + fmtBytes(numv(r.freed)) + "（" + fmtNum(numv(r.files)) + " 个文件）" +
+        (notes.length ? "。" + notes.join("；") : "") +
+        (errs.length ? "；失败 " + errs.length + " 项：" +
+          errs.map((x) => x.label + "（" + x.error + "）").join("；") : "");
+      selected.clear();
+      touched = false;
+      report = null;
+      await load(true);
+    } catch (e) {
+      msg.className = "msg err";
+      msg.textContent = "清理失败：" + e.message;
+    } finally {
+      busy = false;
+      syncBar();
+    }
+  };
+
+  headCb.addEventListener("change", () => {
+    touched = true;
+    if (headCb.checked) cleanable().forEach((it) => selected.add(it.key));
+    else selected.clear();
+    applySelection();
+  });
+
+  loadDisk();
+  load(false);
+
+  root.replaceChildren(card("磁盘垃圾", [
+    el("div", { class: "row wrap toolbar" }, [
+      scanBtn,
+      el("span", { class: "tool-divider" }),
+      el("span", { class: "hint", text: "只处理白名单位置，正在写的日志与运行中的容器不碰" }),
+      el("div", { class: "spacer" }),
+      cleanBtn,
+    ]),
+    diskLine,
+    selBar,
+    summary,
+    msg,
+    el("div", { class: "table-wrap" }, [
+      el("table", { class: "data junk-table" }, [
+        el("thead", {}, [el("tr", {}, [
+          el("th", { class: "check" }, [headCb]),
+          el("th", { text: "类别" }),
+          el("th", { text: "占用" }),
+          el("th", { text: "文件数" }),
+          el("th", { text: "操作" }),
+        ])]),
+        tbody,
+      ]),
+    ]),
+    el("div", { class: "hint", text: "白名单：APT 安装包、journald、已轮转日志、/tmp 与 /var/tmp 中 7 天未修改的顶层文件、崩溃转储、/root 下的构建缓存、Docker 悬空镜像、面板回收站。占用按文件逻辑大小统计，与 du 的块占用可能略有差异；标「注意影响」的项默认不勾选。" }),
+  ]));
+
+  // 切页时停掉轮询，避免回来时还在改旧 DOM
+  state.cleanup = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+    seq++;
+  };
 }
 
 // ---------- 中转 ----------

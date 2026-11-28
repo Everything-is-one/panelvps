@@ -409,29 +409,44 @@ func Clean(source string, opt Options, target int64) (*CleanResult, error) {
 		if !hasJournalctl() {
 			return nil, errors.New("当前系统没有 journalctl，无法清理该来源")
 		}
-		if target <= 0 {
-			target = 50 << 20
-		}
-		if target < minJournalKeep {
-			target = minJournalKeep
-		}
-		res.Before = JournalUsage()
-		out, err := vacuumJournal(target)
+		before, after, note, err := Vacuum(target)
 		if err != nil {
 			return nil, err
 		}
-		res.After = JournalUsage()
-		if res.Before > res.After {
-			res.Freed = res.Before - res.After
+		res.Before, res.After = before, after
+		if before > after {
+			res.Freed = before - after
 		}
-		res.Note = "journald 已回收到 " + mbText(res.After) +
-			"，只保留最近的部分；当前活动文件要先轮转才参与回收"
-		if out != "" {
-			res.Note += "。journalctl：" + out
-		}
+		res.Note = note
 		return res, nil
 	}
 	return nil, ErrUnknownSource
+}
+
+// Vacuum 把 journald 的落盘量压到 target 字节以下，返回清理前后的占用与提示。
+//
+// 单独导出是因为「清理」页（internal/junk）也要回收 journald：两处必须走
+// 同一套动作（先 --rotate 再 --vacuum-size）与同一个下限，否则同一个按钮
+// 在日志页与清理页会得到不同结果。
+func Vacuum(target int64) (before, after int64, note string, err error) {
+	if target <= 0 {
+		target = 50 << 20
+	}
+	if target < minJournalKeep {
+		target = minJournalKeep
+	}
+	before = JournalUsage()
+	out, err := vacuumJournal(target)
+	if err != nil {
+		return before, before, "", err
+	}
+	after = JournalUsage()
+	note = "journald 已回收到 " + mbText(after) +
+		"，只保留最近的部分；当前活动文件要先轮转才参与回收"
+	if out != "" {
+		note += "。journalctl：" + out
+	}
+	return before, after, note, nil
 }
 
 // JournalUsage 统计 journald 落盘占用的字节数。

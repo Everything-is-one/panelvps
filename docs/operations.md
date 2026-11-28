@@ -280,6 +280,7 @@ REALITY 层，先核对客户端里的**公钥（pbk）与 shortId** 是否与�
 | Web 终端 | PTY + WebSocket；一次性票据（2 分钟、单次使用），不把 Cookie 放进 URL；shell 必须是绝对路径 |
 | 防火墙 | `nft` 建表探测失败自动降级 `iptables-legacy`；SSH 与面板端口**永远排在用户 drop 规则之前**；nft set 自带 timeout 实现到期自动解封 |
 | 日志 | 六个固定来源，不接受任意路径；只 seek 文件末尾 512KB，不会把整个日志读进内存；来源列表带文件大小，清理只允许打在白名单来源上（见下） |
+| 垃圾清理 | 八个类别写死在 `internal/junk`，接口只收类别键；只删普通文件、不跟随符号链接，正在写的日志与运行中的容器不碰（见下） |
 | 异步任务 | 内存态执行器，并发 2、单任务 15 分钟超时、日志上限 256KB，避免 apt/证书撑爆 HTTP 超时 |
 
 ### 日志：大小、清理、配色
@@ -305,6 +306,40 @@ journald 是全机共用的，回收会连带删掉其它服务的旧记录，�
 投屏、打印用。这是浏览器本地偏好（`localStorage` 的 `panelvps.logTheme`），不进配置文件：
 它纯属显示偏好，换台电脑看不出来是正常的。切换会同时改已建好的 xterm（`term.options.theme`），
 不需要刷新。浅色不是把深色反过来——ANSI 的绿、黄在白底上必须压暗，否则直接糊成一片。
+
+### 磁盘垃圾清理：白名单与口径
+
+「清理」页处理的是「一眼就是垃圾、删了不影响服务」的东西。接口只收类别键，
+路径全部写死在 `internal/junk/catalog()`：面板以 root 运行，一个「删任意路径」的
+清理接口等于把文件管理模块的沙箱整个绕开。新增类别时必须同时给出位置、匹配规则、
+清理方式与影响说明，前端会把影响写进确认框。
+
+| 类别 | 位置与匹配 | 清理方式 | 影响 |
+|---|---|---|---|
+| `apt` | `/var/cache/apt/archives/**/*.deb` | 删文件 | 已安装软件不受影响，下次装包重新下载 |
+| `journal` | `/var/log/journal`、`/run/log/journal` | `journalctl --rotate` + `--vacuum-size=50M` | 全机共用，其它服务的旧日志一起回收；下限 8MB |
+| `rotated` | `/var/log` 与 `/var/log/nginx` 顶层的 `.gz` / `.xz` / `.1–.9` / `.old` / `-YYYYMMDD` | 删文件 | 只删已轮转归档，正在写的 `access.log` / `syslog` 不动 |
+| `tmp` | `/tmp`、`/var/tmp` 顶层普通文件，mtime 超过 7 天 | 删文件 | 跳过 `systemd-private-*`、`snap-private-tmp`、子目录与套接字 |
+| `crash` | `/var/crash/*.crash` | 删文件 | 崩溃转储，删掉不影响运行 |
+| `devcache` | `/root/.cache/{pip,uv,go-build}`、`/root/.npm/_cacache`、`/root/.cache/yarn`、`/root/go/pkg/mod/cache/download` | 删文件 | 可重建，下次构建变慢 |
+| `docker` | `docker image ls --filter dangling=true` | `docker image prune -f` | 只删悬空层；使用中的镜像、容器、数据卷不动 |
+| `trash` | `<数据目录>/trash` | 逐项 `RemoveAll` | 面板回收站，删后不可恢复 |
+
+几条硬约束：
+
+- **只认普通文件**。符号链接、设备、FIFO、套接字一律跳过——它们的大小没有意义，
+  删掉还可能让正在运行的服务直接失联。
+- **不碰正在写的东西**。日志只清已轮转的归档；`/tmp` 只清顶层且 7 天未修改的；
+  Docker 只 prune 悬空镜像，不带 `-a`，也不碰 volume。
+- **`/boot` 只读，不做内核清理**。单元里 `ReadOnlyPaths=-/boot -/efi`，
+  想删旧内核得走 `apt autoremove`，那会连带删除自动安装的包，不适合放进「一键清理」。
+- **统计口径是文件逻辑大小**，与 `du` 的块占用（磁盘占用分析用的口径）可能略有差异：
+  大量小文件时 du 会更大，稀疏文件则相反。页面上标注了这一点。
+
+扫描与磁盘占用分析一样是异步的（首次返回 `state=running`，前端 700ms 轮询），
+结果缓存 2 分钟；清理成功后缓存立即失效，避免看到清理前的数字。清理是不可逆操作，
+服务端要求 `confirm=CLEAN` 并记 `junk_clean` 审计，前端确认框逐条列出「清什么、
+多大、有什么影响」，两层都过才会删。
 
 
 ## 忘记密码：先确认服务在用哪个库

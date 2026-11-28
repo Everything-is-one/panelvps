@@ -940,6 +940,20 @@ table.du-table td.du-name { max-width: 320px; overflow: hidden; text-overflow: e
   font-size: 11.5px; color: var(--muted-2);
 }
 
+/* ---------- 磁盘垃圾清理 ---------- */
+
+/* 类别列要放「标题 + 位置 + 一句影响说明」，不给最小宽度会被压成一列字。
+ * 说明文字限宽：窄屏上整段摊开会让表格横向溢出。 */
+table.junk-table th.check { width: 34px; }
+table.junk-table td.check { width: 34px; }
+table.junk-table td.junk-item { min-width: 280px; }
+table.junk-table .junk-name { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+table.junk-table .junk-name strong { font-weight: 600; }
+table.junk-table .junk-detail { margin-top: 4px; font-size: 12px; overflow-wrap: anywhere; }
+table.junk-table .junk-hint { margin-top: 5px; max-width: 560px; font-size: 12.5px; line-height: 1.55; }
+table.junk-table tbody tr.selected td { background: #f4f6ff; }
+table.junk-table tbody tr.selected:hover td { background: #eef1ff; }
+
 /* ---------- 终端标签 ---------- */
 
 /* 标签贴一条底线，标签自身只留上圆角、底边不画：

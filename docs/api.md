@@ -66,6 +66,8 @@ panelvps relay -listen :8443 -to 1.2.3.4:443 -udp   # TCP + UDP
 GET    /api/v1/system/stat              资源指标（CPU / 内存 / 磁盘 / 负载）
 GET    /api/v1/system/info              系统环境（发行版 / 内核 / cgroup / 时区）
 GET    /api/v1/system/disk-usage        磁盘占用扫描（path=&refresh=1，异步任务）
+GET    /api/v1/system/junk              磁盘垃圾扫描（refresh=1 绕过缓存，异步任务）
+POST   /api/v1/system/junk/clean        按类别清理（keys + confirm=CLEAN）
 GET    /api/v1/files                    目录列表
 GET    /api/v1/files/search             按文件名搜索（q=&limit=，子目录递归）
 GET    /api/v1/security/records         外网攻击记录（minutes=）
@@ -74,3 +76,9 @@ GET    /api/v1/updates/state            版本检查结果
 
 磁盘扫描是异步的：首次请求返回 `state=running`，前端轮询同一路径直到 `done`，
 结果缓存 3 分钟，同一路径同时只跑一个任务、全局最多 2 个并发。
+
+垃圾扫描同一套节奏（`state=running|done`、结果缓存 2 分钟）。清理接口只收类别键
+（`apt` / `journal` / `rotated` / `tmp` / `crash` / `devcache` / `docker` / `trash`），
+**不收路径**——具体位置与删除方式由服务端白名单决定；还要 `confirm=CLEAN`，
+并记一条 `junk_clean` 审计。每个类别各自返回 `freed` / `files` / `note` / `error`，
+一项失败不会中断整批。
